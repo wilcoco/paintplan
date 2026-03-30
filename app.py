@@ -177,6 +177,53 @@ def get_grp(ct, it, det=''):
     if 'AX' in ct or 'PE' in ct: return 'G'
     return None
 
+def load_data_from_db(demand_date):
+    """DB에서 수요 데이터 로드"""
+    from datetime import timedelta
+
+    if isinstance(demand_date, str):
+        demand_date = datetime.strptime(demand_date, '%Y-%m-%d').date()
+
+    d1_date = demand_date + timedelta(days=1)
+    d2_date = demand_date + timedelta(days=2)
+
+    items = []
+    all_items = Item.query.all()
+
+    for item in all_items:
+        inv = Inventory.query.filter_by(item_id=item.id, stock_date=demand_date).first()
+        stk = inv.quantity if inv else 0
+
+        def get_demands(target_date):
+            demands = DailyDemand.query.filter_by(item_id=item.id, demand_date=target_date).order_by(DailyDemand.rotation).all()
+            result = [0] * 10
+            for d in demands:
+                if 1 <= d.rotation <= 10:
+                    result[d.rotation - 1] = d.quantity
+            return result
+
+        d0 = get_demands(demand_date)
+        d1 = get_demands(d1_date)
+        d2 = get_demands(d2_date)
+
+        items.append({
+            'ct': item.car_type,
+            'it': item.item_name,
+            'det': item.detail or '-',
+            'clr': item.color,
+            'stk': stk,
+            'd0': d0, 'd0t': sum(d0),
+            'd1': d1, 'd1t': sum(d1),
+            'd2': d2, 'd2t': sum(d2),
+            'grp': item.jig_group or get_grp(item.car_type, item.item_name, item.detail or ''),
+            'cur': stk,
+            'prod': [0] * 10,
+            'prod1': [0] * 10,
+            'prod2': [0] * 10
+        })
+
+    return items
+
 # ============================================
 # Routes
 # ============================================
@@ -417,12 +464,9 @@ def api_schedule():
     if not demand_date:
         return jsonify({'error': 'Date required'}), 400
 
-    # Import scheduling logic
-    from generate_report import schedule, load_data_from_db
-
-    # Load data and run schedule
     try:
-        items = load_data_from_db(db, demand_date)
+        from generate_report import schedule
+        items = load_data_from_db(demand_date)
         result = schedule(items)
         return jsonify(result)
     except Exception as e:
@@ -437,12 +481,10 @@ def api_report():
         return jsonify({'error': 'Date required'}), 400
 
     try:
-        from generate_report import generate_html_report, schedule, load_data_from_db
-
-        items = load_data_from_db(db, demand_date)
+        from generate_report import generate_html_report, schedule
+        items = load_data_from_db(demand_date)
         result = schedule(items)
         html = generate_html_report(items, result)
-
         return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -451,9 +493,15 @@ def api_report():
 # Main
 # ============================================
 
-with app.app_context():
-    init_db()
+@app.before_request
+def ensure_db():
+    """첫 요청 시 DB 초기화"""
+    if not hasattr(app, '_db_initialized'):
+        init_db()
+        app._db_initialized = True
 
 if __name__ == '__main__':
+    with app.app_context():
+        init_db()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)

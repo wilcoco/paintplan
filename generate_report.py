@@ -98,58 +98,6 @@ def load_data():
     wb.close()
     return items
 
-def load_data_from_db(db, demand_date):
-    """DB에서 수요 데이터 로드 (Railway 배포용)"""
-    from datetime import datetime, timedelta
-
-    if isinstance(demand_date, str):
-        demand_date = datetime.strptime(demand_date, '%Y-%m-%d').date()
-
-    d1_date = demand_date + timedelta(days=1)
-    d2_date = demand_date + timedelta(days=2)
-
-    # Import models
-    from app import Item, DailyDemand, Inventory
-
-    items = []
-    all_items = Item.query.all()
-
-    for item in all_items:
-        # Get inventory
-        inv = Inventory.query.filter_by(item_id=item.id, stock_date=demand_date).first()
-        stk = inv.quantity if inv else 0
-
-        # Get demands for D0, D+1, D+2
-        def get_demands(date):
-            demands = DailyDemand.query.filter_by(item_id=item.id, demand_date=date).order_by(DailyDemand.rotation).all()
-            result = [0] * 10
-            for d in demands:
-                if 1 <= d.rotation <= 10:
-                    result[d.rotation - 1] = d.quantity
-            return result
-
-        d0 = get_demands(demand_date)
-        d1 = get_demands(d1_date)
-        d2 = get_demands(d2_date)
-
-        items.append({
-            'ct': item.car_type,
-            'it': item.item_name,
-            'det': item.detail or '-',
-            'clr': item.color,
-            'stk': stk,
-            'd0': d0, 'd0t': sum(d0),
-            'd1': d1, 'd1t': sum(d1),
-            'd2': d2, 'd2t': sum(d2),
-            'grp': item.jig_group or get_grp(item.car_type, item.item_name, item.detail or ''),
-            'cur': stk,
-            'prod': [0] * 10,
-            'prod1': [0] * 10,
-            'prod2': [0] * 10
-        })
-
-    return items
-
 def calc_jig_change(tmpl1, tmpl2, prev_order=None):
     """
     위치 기반 지그 교체 수 계산
