@@ -429,6 +429,55 @@ def schedule_day(items, day_key, demand_key, prod_key, start_stock_key,
             return max(color_prod.keys(), key=lambda c: color_prod[c])
         return None
 
+    # 지그 순서를 컬러별로 재정렬 (컬러 교환 최소화)
+    prev_rot_last_color_for_sort = prev_day_color
+    for r in range(10):
+        tmpl = templates[r]
+        order = jig_orders[r] if jig_orders[r] else sorted(tmpl.keys())
+
+        # 각 지그그룹의 컬러 파악
+        grp_colors = {}
+        for g in order:
+            if g in tmpl and tmpl[g] > 0:
+                grp_colors[g] = get_grp_main_color(g, r)
+
+        # 컬러별로 지그그룹 묶기
+        color_groups = defaultdict(list)
+        for g, clr in grp_colors.items():
+            if clr:
+                color_groups[clr].append(g)
+
+        # 이전 회전 마지막 컬러 → 같은 컬러 먼저, 그 다음 다른 컬러들
+        new_order = []
+        used_colors = set()
+
+        # 1. 이전 컬러와 같은 컬러의 지그그룹들 먼저
+        if prev_rot_last_color_for_sort and prev_rot_last_color_for_sort in color_groups:
+            for g in color_groups[prev_rot_last_color_for_sort]:
+                new_order.append(g)
+            used_colors.add(prev_rot_last_color_for_sort)
+
+        # 2. 나머지 컬러들 (수요 많은 컬러 순)
+        remaining_colors = [c for c in color_groups.keys() if c not in used_colors]
+        # 컬러별 총 행어수로 정렬
+        remaining_colors.sort(key=lambda c: -sum(tmpl.get(g, 0) for g in color_groups[c]))
+
+        for clr in remaining_colors:
+            for g in color_groups[clr]:
+                new_order.append(g)
+
+        # 컬러 없는 지그그룹 추가
+        for g in order:
+            if g not in new_order and g in tmpl and tmpl[g] > 0:
+                new_order.append(g)
+
+        jig_orders[r] = new_order
+
+        # 다음 회전을 위해 마지막 컬러 저장
+        if new_order:
+            last_g = new_order[-1]
+            prev_rot_last_color_for_sort = grp_colors.get(last_g)
+
     prev_rot_last_color = prev_day_color  # 전날 마지막 컬러
     total_cc = 0
 
