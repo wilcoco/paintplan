@@ -1,0 +1,45 @@
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Database
+*.db
+*.sqlite3
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Large Excel files (use sample instead)
+paint.xlsx
+paint2.xlsx
+paint\ 2.xlsx
+~$*.xlsx
+
+# Generated files
+*.html
+*.csv
+
+# Templates keep
+!templates/*.html
+
+# Claude
+.claude/
