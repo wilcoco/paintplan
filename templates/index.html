@@ -1,398 +1,273 @@
 <!DOCTYPE html>
 <html lang="ko">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>도장 생산계획 시스템</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-<style>
-  body { font-size: 13px; }
-  .tab-content { padding-top: 16px; }
-  table { font-size: 12px; }
-  .ok { background: #d4edda; }
-  .ng { background: #f8d7da; }
-  .warn { background: #fff3cd; }
-  .rotation-table td { padding: 2px 4px; white-space: nowrap; }
-  .color-changed { font-weight: bold; border-left: 3px solid #dc3545; }
-  #chartContainer { max-height: 400px; }
-  .badge-jig { font-size: 10px; }
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>도장 생산계획 시스템</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .nav-tabs .nav-link { cursor: pointer; }
+        .tab-content { padding: 20px 0; }
+        .upload-area { border: 2px dashed #ccc; padding: 40px; text-align: center; margin: 20px 0; border-radius: 8px; }
+        .upload-area:hover { border-color: #0d6efd; background: #f8f9fa; }
+        .jig-card { margin-bottom: 10px; }
+        .table-sm td, .table-sm th { padding: 4px 8px; font-size: 12px; }
+    </style>
 </head>
 <body>
-<div class="container-fluid px-3 py-2">
-  <h5 class="mb-3">🏭 도장 생산계획 시스템</h5>
-
-  <ul class="nav nav-tabs" id="mainTab">
-    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tabConfig">⚙️ 설정</a></li>
-    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tabItems">📦 아이템</a></li>
-    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tabDemand">📊 수요</a></li>
-    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tabSafety">🛡️ 안전재고</a></li>
-    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tabPlan">🔧 생산계획</a></li>
-    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tabChart">📈 그래프</a></li>
-  </ul>
-
-  <div class="tab-content">
-
-    <!-- 설정 탭 -->
-    <div class="tab-pane fade show active" id="tabConfig">
-      <h6>컨베이어 설정</h6>
-      <div class="row g-3 mb-3" style="max-width:600px">
-        <div class="col-4"><label class="form-label">행어 수</label>
-          <input type="number" class="form-control" id="cfgHangers" value="140"></div>
-        <div class="col-4"><label class="form-label">회전/일</label>
-          <input type="number" class="form-control" id="cfgRotations" value="10"></div>
-        <div class="col-4"><label class="form-label">지그교환 한도/일</label>
-          <input type="number" class="form-control" id="cfgMaxJig" value="280"></div>
-        <div class="col-4"><label class="form-label">안전재고 일수</label>
-          <input type="number" class="form-control" id="cfgSafety" value="3"></div>
-        <div class="col-4"><label class="form-label">계획 일수</label>
-          <input type="number" class="form-control" id="cfgDays" value="12"></div>
-        <div class="col-12">
-          <button class="btn btn-primary btn-sm" onclick="saveConfig()">설정 저장</button>
+    <nav class="navbar navbar-dark bg-primary">
+        <div class="container">
+            <span class="navbar-brand mb-0 h5">도장 생산계획 시스템 v8.11</span>
         </div>
-      </div>
+    </nav>
 
-      <h6>사출품별 지그/행어 설정</h6>
-      <p class="text-muted small">사출품(지그 타입)마다 행어 1개에 꽂을 수 있는 지그 수가 다릅니다.</p>
-      <div id="productJigTable" style="max-width:500px"></div>
-      <button class="btn btn-outline-success btn-sm mt-2" onclick="saveProductJigs()">지그 설정 저장</button>
+    <div class="container mt-4">
+        <ul class="nav nav-tabs" id="mainTabs">
+            <li class="nav-item">
+                <a class="nav-link active" data-bs-toggle="tab" href="#config">설정</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" data-bs-toggle="tab" href="#demand">수요</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" data-bs-toggle="tab" href="#schedule">생산계획</a>
+            </li>
+        </ul>
+
+        <div class="tab-content">
+            <!-- 설정 탭 -->
+            <div class="tab-pane fade show active" id="config">
+                <h5 class="mt-3">시스템 변수</h5>
+                <table class="table table-bordered table-sm" style="max-width:500px" id="configTable">
+                    <thead class="table-light">
+                        <tr><th>변수</th><th>값</th><th>설명</th></tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+                <button class="btn btn-primary btn-sm" onclick="saveConfig()">저장</button>
+
+                <hr>
+
+                <h5>지그 그룹</h5>
+                <div id="jigGroups" class="row"></div>
+            </div>
+
+            <!-- 수요 탭 -->
+            <div class="tab-pane fade" id="demand">
+                <h5 class="mt-3">수요 데이터 업로드</h5>
+                <div class="row mb-3">
+                    <div class="col-md-3">
+                        <label class="form-label">기준일자</label>
+                        <input type="date" class="form-control" id="demandDate">
+                    </div>
+                </div>
+
+                <div class="upload-area" id="uploadArea">
+                    <h6>엑셀 파일을 드래그하거나 클릭하여 업로드</h6>
+                    <p class="text-muted small mb-0">paint2.xlsx 형식</p>
+                    <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none;">
+                </div>
+
+                <div id="uploadResult" class="alert" style="display:none;"></div>
+
+                <hr>
+
+                <h5>수요 데이터 조회</h5>
+                <button class="btn btn-outline-secondary btn-sm" onclick="loadDemand()">조회</button>
+                <div id="demandTable" class="mt-3" style="overflow-x:auto;"></div>
+            </div>
+
+            <!-- 생산계획 탭 -->
+            <div class="tab-pane fade" id="schedule">
+                <h5 class="mt-3">생산계획 생성</h5>
+                <div class="row align-items-end mb-3">
+                    <div class="col-md-3">
+                        <label class="form-label">기준일자</label>
+                        <input type="date" class="form-control" id="scheduleDate">
+                    </div>
+                    <div class="col-md-6">
+                        <button class="btn btn-primary" onclick="runSchedule()">스케줄링 실행</button>
+                        <button class="btn btn-success ms-2" onclick="viewReport()">HTML 리포트</button>
+                    </div>
+                </div>
+
+                <div id="scheduleLoading" style="display:none;">
+                    <div class="spinner-border spinner-border-sm text-primary"></div>
+                    <span class="ms-2">스케줄링 중...</span>
+                </div>
+
+                <div id="scheduleResult" class="mt-3"></div>
+            </div>
+        </div>
     </div>
 
-    <!-- 아이템 탭 -->
-    <div class="tab-pane fade" id="tabItems">
-      <div class="mb-2">
-        <button class="btn btn-outline-primary btn-sm" onclick="loadSampleItems()">샘플 아이템 등록 (10품×20색)</button>
-        <button class="btn btn-warning btn-sm" onclick="autoStock()">초기재고 자동설정 (3일치)</button>
-        <button class="btn btn-outline-secondary btn-sm" onclick="loadItems()">새로고침</button>
-      </div>
-      <div class="row g-2 mb-2" style="max-width:500px">
-        <div class="col-3"><input class="form-control form-control-sm" id="newPC" placeholder="품번 001"></div>
-        <div class="col-3"><input class="form-control form-control-sm" id="newColor" placeholder="컬러 RED"></div>
-        <div class="col-3"><input class="form-control form-control-sm" id="newStock" placeholder="초기재고 0" type="number"></div>
-        <div class="col-3"><button class="btn btn-sm btn-success" onclick="addItem()">추가</button></div>
-      </div>
-      <div id="itemsTable" style="max-height:500px; overflow:auto;"></div>
-    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const today = new Date().toISOString().split('T')[0];
+        document.getElementById('demandDate').value = today;
+        document.getElementById('scheduleDate').value = today;
 
-    <!-- 수요 탭 -->
-    <div class="tab-pane fade" id="tabDemand">
-      <div class="mb-2">
-        <button class="btn btn-outline-primary btn-sm" onclick="genSampleDemand()">샘플 수요 생성</button>
-        <button class="btn btn-outline-secondary btn-sm" onclick="loadDemand()">새로고침</button>
-      </div>
-      <div id="demandTable" style="max-height:600px; overflow:auto;"></div>
-    </div>
+        loadConfig();
+        loadJigGroups();
 
-    <!-- 안전재고 탭 -->
-    <div class="tab-pane fade" id="tabSafety">
-      <button class="btn btn-outline-info btn-sm mb-2" onclick="loadSafety()">안전재고 상태 확인</button>
-      <div id="safetyTable" style="max-height:600px; overflow:auto;"></div>
-    </div>
+        async function loadConfig() {
+            const r = await fetch('/api/config');
+            const data = await r.json();
+            const tbody = document.querySelector('#configTable tbody');
+            tbody.innerHTML = data.map(c => `
+                <tr>
+                    <td><code>${c.key}</code></td>
+                    <td><input type="text" class="form-control form-control-sm" data-key="${c.key}" value="${c.value}" style="width:80px"></td>
+                    <td class="text-muted small">${c.description || ''}</td>
+                </tr>
+            `).join('');
+        }
 
-    <!-- 생산계획 탭 -->
-    <div class="tab-pane fade" id="tabPlan">
-      <button class="btn btn-danger btn-sm mb-2" onclick="runPlan()">🔧 생산계획 실행</button>
-      <span id="planStatus" class="ms-2 text-muted"></span>
-      <div id="planDaySelect" class="mb-2"></div>
-      <div id="planResult"></div>
-    </div>
+        async function saveConfig() {
+            const inputs = document.querySelectorAll('#configTable input');
+            const data = {};
+            inputs.forEach(inp => data[inp.dataset.key] = inp.value);
+            await fetch('/api/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(data)
+            });
+            alert('저장되었습니다.');
+        }
 
-    <!-- 그래프 탭 -->
-    <div class="tab-pane fade" id="tabChart">
-      <div class="mb-2">
-        <select id="chartItem" class="form-select form-select-sm d-inline-block" style="width:250px" onchange="drawChart()">
-          <option value="_total">전체 합산</option>
-        </select>
-      </div>
-      <div id="chartContainer"><canvas id="mainChart"></canvas></div>
-    </div>
+        async function loadJigGroups() {
+            const r = await fetch('/api/jig-groups');
+            const data = await r.json();
+            document.getElementById('jigGroups').innerHTML = data.map(g => `
+                <div class="col-md-4 col-lg-3 jig-card">
+                    <div class="card">
+                        <div class="card-body py-2">
+                            <h6 class="card-title mb-1">${g.code}: ${g.name}</h6>
+                            <small class="text-muted">최대 ${g.max_jigs}지그 / ${g.max_hangers}행어 / ${g.pcs_per_jig}pcs</small>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
 
-  </div>
-</div>
+        // File upload
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('fileInput');
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-// ── 글로벌 ──
-let planData = null;
-let chartInstance = null;
-let chartData = null;
+        uploadArea.onclick = () => fileInput.click();
+        uploadArea.ondragover = e => { e.preventDefault(); uploadArea.style.borderColor = '#0d6efd'; };
+        uploadArea.ondragleave = () => uploadArea.style.borderColor = '#ccc';
+        uploadArea.ondrop = e => {
+            e.preventDefault();
+            uploadArea.style.borderColor = '#ccc';
+            if (e.dataTransfer.files.length) uploadFile(e.dataTransfer.files[0]);
+        };
+        fileInput.onchange = () => { if (fileInput.files.length) uploadFile(fileInput.files[0]); };
 
-// ── 설정 ──
-async function loadConfig() {
-  const r = await fetch('/api/config');
-  const d = await r.json();
-  document.getElementById('cfgHangers').value = d.hanger_count;
-  document.getElementById('cfgRotations').value = d.rotations_per_day;
-  document.getElementById('cfgMaxJig').value = d.max_jig_changes;
-  document.getElementById('cfgSafety').value = d.safety_stock_days;
-  document.getElementById('cfgDays').value = d.planning_days;
-  loadProductJigs();
-}
+        async function uploadFile(file) {
+            const date = document.getElementById('demandDate').value;
+            if (!date) { alert('기준일자를 선택하세요.'); return; }
 
-async function saveConfig() {
-  await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({
-      hanger_count: +document.getElementById('cfgHangers').value,
-      rotations_per_day: +document.getElementById('cfgRotations').value,
-      max_jig_changes: +document.getElementById('cfgMaxJig').value,
-      safety_stock_days: +document.getElementById('cfgSafety').value,
-      planning_days: +document.getElementById('cfgDays').value,
-    })});
-  alert('저장됨');
-}
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('date', date);
 
-// ── 사출품별 지그/행어 ──
-async function loadProductJigs() {
-  const r = await fetch('/api/products');
-  const prods = await r.json();
-  if (!prods.length) {
-    document.getElementById('productJigTable').innerHTML =
-      '<p class="text-muted">아이템을 먼저 등록하세요</p>';
-    return;
-  }
-  let h = '<table class="table table-sm table-bordered"><thead><tr><th>사출품</th><th>지그/행어</th><th>보유 지그수</th><th>최대 행어</th></tr></thead><tbody>';
-  prods.forEach(p => {
-    h += `<tr><td><b>${p.product_code}</b></td>`;
-    h += `<td><select class="form-select form-select-sm jig-select" data-pc="${p.product_code}" style="width:70px">`;
-    [2,3,4,6].forEach(n => {
-      const sel = n === p.jigs_per_hanger ? 'selected' : '';
-      h += `<option value="${n}" ${sel}>${n}</option>`;
-    });
-    h += '</select></td>';
-    h += `<td><input type="number" class="form-control form-control-sm jig-count" data-pc="${p.product_code}" value="${p.jig_count||80}" style="width:80px"></td>`;
-    h += `<td class="max-h" data-pc="${p.product_code}">${p.max_hangers||'?'}</td>`;
-    h += '</tr>';
-  });
-  h += '</tbody></table>';
-  document.getElementById('productJigTable').innerHTML = h;
-}
+            const resultDiv = document.getElementById('uploadResult');
+            resultDiv.className = 'alert alert-info';
+            resultDiv.textContent = '업로드 중...';
+            resultDiv.style.display = 'block';
 
-async function saveProductJigs() {
-  const selects = document.querySelectorAll('.jig-select');
-  const counts = document.querySelectorAll('.jig-count');
-  const data = [];
-  selects.forEach(sel => {
-    const pc = sel.dataset.pc;
-    const countEl = document.querySelector(`.jig-count[data-pc="${pc}"]`);
-    const jc = countEl ? +countEl.value : 80;
-    data.push({product_code: pc, jigs_per_hanger: +sel.value, jig_count: jc});
-  });
-  await fetch('/api/products', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(data)});
-  alert('지그 설정 저장됨');
-  loadProductJigs();
-}
+            try {
+                const r = await fetch('/api/demand/upload', { method: 'POST', body: formData });
+                const data = await r.json();
+                if (data.success) {
+                    resultDiv.className = 'alert alert-success';
+                    resultDiv.textContent = `업로드 완료! 아이템 ${data.items_created}개, 수요 ${data.demands_created}개`;
+                } else {
+                    resultDiv.className = 'alert alert-danger';
+                    resultDiv.textContent = '오류: ' + data.error;
+                }
+            } catch(e) {
+                resultDiv.className = 'alert alert-danger';
+                resultDiv.textContent = '업로드 실패: ' + e;
+            }
+        }
 
-// ── 아이템 ──
-async function loadItems() {
-  const r = await fetch('/api/items');
-  const items = await r.json();
-  if (!items.length) { document.getElementById('itemsTable').innerHTML='<p class="text-muted">아이템 없음</p>'; return; }
-  let h = '<table class="table table-sm table-bordered"><thead><tr><th>품번</th><th>사출품</th><th>컬러</th><th>초기재고</th></tr></thead><tbody>';
-  items.forEach(i => { h += `<tr><td><b>${i.item_code}</b></td><td>${i.product_code}</td><td>${i.color}</td><td>${i.initial_stock}</td></tr>`; });
-  h += '</tbody></table>';
-  document.getElementById('itemsTable').innerHTML = h;
-}
+        async function loadDemand() {
+            const date = document.getElementById('demandDate').value;
+            if (!date) { alert('기준일자를 선택하세요.'); return; }
 
-async function loadSampleItems() {
-  const products = {{ products | tojson }}.map(p => p.id);
-  const colors = {{ colors | tojson }}.map(c => c.id);
-  // 사출품별 기본 지그/행어: 001,002=2, 003,004=3, 005,006=4, 나머지=2
-  const jigs_map = {};
-  const jig_counts = {};
-  // 실무: 주력 001,002만 지그 많고, 나머지는 적음 → 140행어에 2~3종만 올라감
-  products.forEach(pc => {
-    if (['001','002'].includes(pc)) { jigs_map[pc] = 2; jig_counts[pc] = 120; }  // 최대 60행어
-    else if (['003'].includes(pc))  { jigs_map[pc] = 2; jig_counts[pc] = 60; }   // 최대 30행어
-    else { jigs_map[pc] = 2; jig_counts[pc] = 20; }  // 최대 10행어
-  });
-  const r = await fetch('/api/items/bulk', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({products, colors, jigs_map, jig_counts})});
-  const d = await r.json();
-  alert(`${d.added}개 등록`);
-  loadItems();
-  loadProductJigs();
-}
+            const r = await fetch('/api/demand?date=' + date);
+            const data = await r.json();
 
-async function autoStock() {
-  const r = await fetch('/api/items/stock/auto', {method:'POST'});
-  const d = await r.json();
-  if (d.error) { alert(d.error); return; }
-  alert(`${d.updated}개 아이템 초기재고 설정 (${d.days}일치)`);
-  loadItems();
-}
+            if (!data.length) {
+                document.getElementById('demandTable').innerHTML = '<p class="text-muted">데이터가 없습니다.</p>';
+                return;
+            }
 
-async function addItem() {
-  const pc = document.getElementById('newPC').value;
-  const color = document.getElementById('newColor').value;
-  const stock = document.getElementById('newStock').value || 0;
-  if (!pc || !color) { alert('품번, 컬러 입력'); return; }
-  await fetch('/api/items', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({product_code: pc, color: color, initial_stock: stock})});
-  loadItems();
-}
+            let html = `<table class="table table-sm table-bordered">
+                <thead class="table-light"><tr>
+                    <th>차종</th><th>아이템</th><th>세부</th><th>컬러</th><th>지그</th><th>재고</th>
+                    <th>1H</th><th>2H</th><th>3H</th><th>4H</th><th>5H</th>
+                    <th>6H</th><th>7H</th><th>8H</th><th>9H</th><th>10H</th><th>합계</th>
+                </tr></thead><tbody>`;
 
-// ── 수요 ──
-async function loadDemand() {
-  const r = await fetch('/api/demand');
-  const data = await r.json();
-  const dates = Object.keys(data).sort();
-  if (!dates.length) { document.getElementById('demandTable').innerHTML='<p class="text-muted">수요 없음</p>'; return; }
+            data.forEach(item => {
+                const total = item.demands.reduce((a,b) => a+b, 0);
+                html += `<tr>
+                    <td>${item.car_type}</td><td>${item.item_name}</td><td>${item.detail||'-'}</td>
+                    <td>${item.color}</td><td>${item.jig_group||'-'}</td><td>${item.stock}</td>
+                    ${item.demands.map(d => `<td>${d||''}</td>`).join('')}
+                    <td><b>${total}</b></td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+            document.getElementById('demandTable').innerHTML = html;
+        }
 
-  const allItems = new Set();
-  dates.forEach(d => Object.keys(data[d]).forEach(i => allItems.add(i)));
-  const items = [...allItems].sort();
+        async function runSchedule() {
+            const date = document.getElementById('scheduleDate').value;
+            if (!date) { alert('기준일자를 선택하세요.'); return; }
 
-  let h = '<table class="table table-sm table-bordered"><thead><tr><th>품번</th>';
-  dates.forEach(d => h += `<th>${d.slice(5)}</th>`);
-  h += '<th>합계</th></tr></thead><tbody>';
-  items.forEach(item => {
-    let sum = 0;
-    h += `<tr><td><b>${item}</b></td>`;
-    dates.forEach(d => { const v = data[d][item]||0; sum+=v; h += `<td>${v||''}</td>`; });
-    h += `<td><b>${sum}</b></td></tr>`;
-  });
-  // 일별 합계
-  h += '<tr class="table-info"><td><b>합계</b></td>';
-  dates.forEach(d => { const s = Object.values(data[d]).reduce((a,b)=>a+b,0); h += `<td><b>${s.toLocaleString()}</b></td>`; });
-  h += '<td></td></tr>';
-  h += '</tbody></table>';
-  document.getElementById('demandTable').innerHTML = h;
-}
+            document.getElementById('scheduleLoading').style.display = 'block';
+            document.getElementById('scheduleResult').innerHTML = '';
 
-async function genSampleDemand() {
-  const r = await fetch('/api/demand/sample', {method:'POST'});
-  const d = await r.json();
-  if (d.error) { alert(d.error); return; }
-  alert(`${d.days}일 수요 생성`);
-  loadDemand();
-}
+            try {
+                const r = await fetch('/api/schedule', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({date})
+                });
+                const data = await r.json();
+                document.getElementById('scheduleLoading').style.display = 'none';
 
-// ── 안전재고 ──
-async function loadSafety() {
-  const r = await fetch('/api/safety-status');
-  const data = await r.json();
-  if (!data.length) { document.getElementById('safetyTable').innerHTML='<p class="text-muted">데이터 없음</p>'; return; }
+                if (data.error) {
+                    document.getElementById('scheduleResult').innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+                    return;
+                }
 
-  const dates = Object.keys(data[0].dates).sort();
-  let h = '<table class="table table-sm table-bordered"><thead><tr><th>품번</th><th>초기재고</th>';
-  dates.forEach(d => h += `<th>${d.slice(5)}<br><small>수요/D0/D1/D2/D3</small></th>`);
-  h += '</tr></thead><tbody>';
+                const d0 = data.d0;
+                const dayJig = d0.jig_changes.slice(0,5).reduce((a,b)=>a+b,0);
+                const nightJig = d0.jig_changes.slice(5).reduce((a,b)=>a+b,0);
 
-  data.forEach(item => {
-    if (Object.values(item.dates).every(d => d.demand === 0)) return;
-    h += `<tr><td><b>${item.item_code}</b></td><td>${item.initial_stock}</td>`;
-    dates.forEach(d => {
-      const info = item.dates[d];
-      if (!info || info.demand === 0) { h += '<td></td>'; return; }
-      const marks = [info.d0_ok, info.d1_ok, info.d2_ok, info.d3_ok]
-        .map(ok => ok ? '✓' : '✗').join('');
-      const cls = !info.d0_ok ? 'ng' : !info.d3_ok ? 'warn' : 'ok';
-      h += `<td class="${cls}">${info.demand}<br><small>${marks}</small></td>`;
-    });
-    h += '</tr>';
-  });
-  h += '</tbody></table>';
-  document.getElementById('safetyTable').innerHTML = h;
-}
+                document.getElementById('scheduleResult').innerHTML = `
+                    <div class="alert alert-success">
+                        <h6>D0 스케줄링 완료</h6>
+                        <p class="mb-1">주간 지그교체: ${dayJig} / 150</p>
+                        <p class="mb-1">야간 지그교체: ${nightJig} / 150</p>
+                        <p class="mb-0">컬러교환: ${d0.color_changes}회</p>
+                    </div>`;
+            } catch(e) {
+                document.getElementById('scheduleLoading').style.display = 'none';
+                document.getElementById('scheduleResult').innerHTML = `<div class="alert alert-danger">오류: ${e}</div>`;
+            }
+        }
 
-// ── 생산계획 ──
-async function runPlan() {
-  document.getElementById('planStatus').textContent = '계산 중...';
-  const r = await fetch('/api/plan/run', {method:'POST'});
-  const data = await r.json();
-  if (data.error) { document.getElementById('planStatus').textContent = data.error; return; }
-
-  planData = data.summary;
-  chartData = data.chart;
-  document.getElementById('planStatus').textContent = `완료 (${planData.length}일)`;
-
-  // 날짜 선택
-  let sel = '<div class="btn-group btn-group-sm">';
-  planData.forEach((d, i) => {
-    sel += `<button class="btn btn-outline-secondary" onclick="showDay(${i})">${d.date.slice(5)}</button>`;
-  });
-  sel += '</div>';
-  document.getElementById('planDaySelect').innerHTML = sel;
-
-  showDay(0);
-  populateChartSelect();
-  drawChart();
-}
-
-function showDay(idx) {
-  const day = planData[idx];
-  let h = `<h6>${day.date} | 생산 ${day.produced.toLocaleString()} | 컬러전환 ${day.transitions}회 | 빈행어 ${day.empty} | 지그교환 ${day.jig_changes}건</h6>`;
-  h += `<p class="text-muted small">지그: ${day.template}</p>`;
-
-  h += '<table class="table table-sm table-bordered rotation-table"><thead><tr><th>회전</th>';
-  // 세그먼트 헤더 (첫 회전 기준)
-  if (day.rotations.length > 0) {
-    const segs = day.rotations[0].cells;
-    segs.forEach(c => h += `<th>${c.product}(${c.hangers}h)</th>`);
-  }
-  h += '<th>전환</th><th>빈행어</th><th>생산</th></tr></thead><tbody>';
-
-  let prevCells = null;
-  day.rotations.forEach(rot => {
-    h += `<tr><td><b>${rot.rotation}</b></td>`;
-    rot.cells.forEach((c, ci) => {
-      const changed = prevCells && prevCells[ci] && prevCells[ci].color !== c.color;
-      const cls = changed ? 'color-changed' : '';
-      const arrow = changed ? '⇐' : '';
-      h += `<td class="${cls}">${c.color}(${c.pieces})${arrow}</td>`;
-    });
-    h += `<td>${rot.transitions}</td><td>${rot.empty}</td><td>${rot.produced}</td></tr>`;
-    prevCells = rot.cells;
-  });
-
-  h += `<tr class="table-secondary"><td><b>합계</b></td>`;
-  if (day.rotations.length > 0) day.rotations[0].cells.forEach(() => h += '<td></td>');
-  h += `<td><b>${day.transitions}</b></td><td><b>${day.empty}</b></td><td><b>${day.produced}</b></td></tr>`;
-  h += '</tbody></table>';
-
-  document.getElementById('planResult').innerHTML = h;
-}
-
-// ── 그래프 ──
-function populateChartSelect() {
-  if (!chartData) return;
-  const sel = document.getElementById('chartItem');
-  sel.innerHTML = '<option value="_total">전체 합산</option>';
-  Object.keys(chartData.items).sort().forEach(ic => {
-    sel.innerHTML += `<option value="${ic}">${ic}</option>`;
-  });
-}
-
-function drawChart() {
-  if (!chartData) return;
-  const sel = document.getElementById('chartItem').value;
-  const d = sel === '_total' ? chartData.total : chartData.items[sel];
-  if (!d) return;
-
-  if (chartInstance) chartInstance.destroy();
-  chartInstance = new Chart(document.getElementById('mainChart'), {
-    type: 'line',
-    data: {
-      labels: d.dates.map(s => s.slice(5)),
-      datasets: [
-        { label: '수요', data: d.demand, borderColor: '#dc3545', backgroundColor: 'rgba(220,53,69,0.1)', fill: false, tension: 0.3 },
-        { label: '생산', data: d.production, borderColor: '#198754', backgroundColor: 'rgba(25,135,84,0.1)', fill: false, tension: 0.3 },
-        { label: '기말재고', data: d.stock_end, borderColor: '#0d6efd', backgroundColor: 'rgba(13,110,253,0.1)', fill: true, tension: 0.3 },
-        { label: '안전재고', data: d.safety, borderColor: '#ffc107', borderDash: [5,5], fill: false, tension: 0.3 },
-      ]
-    },
-    options: {
-      responsive: true,
-      plugins: { title: { display: true, text: sel === '_total' ? '전체 합산' : sel } },
-      scales: { y: { beginAtZero: true } },
-    }
-  });
-}
-
-// ── 초기 로드 ──
-loadConfig();
-</script>
+        function viewReport() {
+            const date = document.getElementById('scheduleDate').value;
+            if (!date) { alert('기준일자를 선택하세요.'); return; }
+            window.open('/api/report?date=' + date, '_blank');
+        }
+    </script>
 </body>
 </html>
