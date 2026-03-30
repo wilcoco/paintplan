@@ -364,28 +364,39 @@ def api_upload_demand():
                 db.session.flush()
                 items_created += 1
 
-            # Read rotation demands (columns 22, 24, 26, ... for D0)
-            demand_cols = [22, 24, 26, 28, 30, 32, 34, 36, 38, 40]
-            for rot, col in enumerate(demand_cols, 1):
-                qty = ws.cell(r, col).value
-                qty = int(qty) if isinstance(qty, (int, float)) else 0
+            # Read rotation demands for D0, D+1, D+2
+            from datetime import timedelta
+            base_date = datetime.strptime(demand_date, '%Y-%m-%d').date()
 
-                existing = DailyDemand.query.filter_by(
-                    item_id=item.id,
-                    demand_date=datetime.strptime(demand_date, '%Y-%m-%d').date(),
-                    rotation=rot
-                ).first()
+            demand_config = [
+                # (day_offset, columns)
+                (0, [22, 24, 26, 28, 30, 32, 34, 36, 38, 40]),   # D0
+                (1, [43, 45, 47, 49, 51, 53, 55, 57, 59, 61]),   # D+1
+                (2, [67, 69, 71, 73, 75, 77, 79, 81, 83, 85]),   # D+2
+            ]
 
-                if existing:
-                    existing.quantity = qty
-                else:
-                    db.session.add(DailyDemand(
+            for day_offset, demand_cols in demand_config:
+                target_date = base_date + timedelta(days=day_offset)
+                for rot, col in enumerate(demand_cols, 1):
+                    qty = ws.cell(r, col).value
+                    qty = int(qty) if isinstance(qty, (int, float)) else 0
+
+                    existing = DailyDemand.query.filter_by(
                         item_id=item.id,
-                        demand_date=datetime.strptime(demand_date, '%Y-%m-%d').date(),
-                        rotation=rot,
-                        quantity=qty
-                    ))
-                    demands_created += 1
+                        demand_date=target_date,
+                        rotation=rot
+                    ).first()
+
+                    if existing:
+                        existing.quantity = qty
+                    else:
+                        db.session.add(DailyDemand(
+                            item_id=item.id,
+                            demand_date=target_date,
+                            rotation=rot,
+                            quantity=qty
+                        ))
+                        demands_created += 1
 
             # Read inventory (columns G, H)
             g, h = ws.cell(r, 7).value, ws.cell(r, 8).value
