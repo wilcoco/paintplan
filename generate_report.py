@@ -794,6 +794,112 @@ def format_rotation_items_html(items, rotation, prod_key, templates, jig_orders)
 
     return "".join(result_parts)
 
+
+def template_to_position_array(tmpl, order):
+    """템플릿을 140개 위치 배열로 변환"""
+    if not tmpl or not order:
+        return [None] * HANGERS
+
+    positions = []
+    for g in order:
+        if g in tmpl and tmpl[g] > 0:
+            positions.extend([g] * tmpl[g])
+
+    # 140개로 맞추기
+    while len(positions) < HANGERS:
+        positions.append(None)
+
+    return positions[:HANGERS]
+
+
+def format_hanger_positions_html(templates, jig_orders, rotation, prev_positions=None):
+    """140개 행어 위치를 시각적으로 표시 (지그 교체 위치 강조)"""
+    tmpl = templates[rotation]
+    order = jig_orders[rotation] if jig_orders and jig_orders[rotation] else sorted(tmpl.keys())
+
+    curr_positions = template_to_position_array(tmpl, order)
+
+    # 지그그룹 색상
+    grp_colors = {
+        'A': '#1976D2', 'B': '#388E3C', 'B2': '#2E7D32', 'C': '#F57C00', 'D': '#C2185B',
+        'E': '#7B1FA2', 'F': '#0097A7', 'G': '#FFA000', 'H': '#5D4037', 'I': '#455A64'
+    }
+
+    # 연속 구간으로 묶기 (같은 지그그룹 연속 위치)
+    segments = []
+    if curr_positions:
+        start = 0
+        current_grp = curr_positions[0]
+        for i in range(1, len(curr_positions)):
+            if curr_positions[i] != current_grp:
+                segments.append({
+                    'grp': current_grp,
+                    'start': start,
+                    'end': i - 1,
+                    'count': i - start
+                })
+                start = i
+                current_grp = curr_positions[i]
+        # 마지막 구간
+        segments.append({
+            'grp': current_grp,
+            'start': start,
+            'end': len(curr_positions) - 1,
+            'count': len(curr_positions) - start
+        })
+
+    # 지그 교체 위치 찾기
+    change_positions = set()
+    if prev_positions:
+        for i in range(HANGERS):
+            if i < len(prev_positions) and i < len(curr_positions):
+                if prev_positions[i] != curr_positions[i]:
+                    change_positions.add(i)
+
+    # HTML 생성 - 바 형태로 표시
+    html_parts = []
+    html_parts.append('<div style="display:flex;align-items:center;gap:10px;margin:5px 0;">')
+    html_parts.append('<span style="font-size:0.75em;color:#666;min-width:60px;">행어위치:</span>')
+    html_parts.append('<div style="display:flex;flex-wrap:nowrap;border:1px solid #999;border-radius:4px;overflow:hidden;flex:1;">')
+
+    for seg in segments:
+        grp = seg['grp']
+        count = seg['count']
+        start = seg['start']
+        end = seg['end']
+
+        if grp is None:
+            color = '#E0E0E0'
+            label = '-'
+        else:
+            color = grp_colors.get(grp, '#9E9E9E')
+            label = grp
+
+        # 이 구간에 교체가 있는지 확인
+        has_change = any(pos in change_positions for pos in range(start, end + 1))
+        border_style = 'border-left:3px solid #F44336;' if has_change and start > 0 else ''
+
+        # 너비를 비율로 계산 (140 기준)
+        width_pct = (count / HANGERS) * 100
+
+        html_parts.append(
+            f'<div style="width:{width_pct:.1f}%;background:{color};color:white;text-align:center;'
+            f'font-size:0.7em;padding:2px 0;min-width:15px;{border_style}" '
+            f'title="위치 {start+1}-{end+1} ({count}행어)">'
+            f'{label}<span style="font-size:0.8em;opacity:0.8;">({count})</span></div>'
+        )
+
+    html_parts.append('</div>')
+
+    # 범례 - 교체 발생 시
+    if change_positions:
+        html_parts.append(f'<span style="font-size:0.7em;color:#D32F2F;margin-left:5px;">교체:{len(change_positions)}개</span>')
+
+    html_parts.append('</div>')
+
+    return ''.join(html_parts), curr_positions
+
+
 def generate_html_report(items, schedule_result):
     today = datetime.now()
     tomorrow = today + timedelta(days=1)
@@ -1185,10 +1291,28 @@ def generate_html_report(items, schedule_result):
 
     # D0 회전별 상세
     html += '<h3 style="margin-top:20px;color:#1565C0;">D0 생산계획</h3>'
+
+    # 지그그룹 색상 범례
+    grp_colors_legend = {
+        'A': '#1976D2', 'B': '#388E3C', 'B2': '#2E7D32', 'C': '#F57C00', 'D': '#C2185B',
+        'E': '#7B1FA2', 'F': '#0097A7', 'G': '#FFA000', 'H': '#5D4037', 'I': '#455A64'
+    }
+    legend_html = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;font-size:0.75em;">'
+    for g, color in grp_colors_legend.items():
+        legend_html += f'<span style="background:{color};color:white;padding:2px 6px;border-radius:3px;">{g}</span>'
+    legend_html += '<span style="border-left:3px solid #F44336;padding-left:5px;margin-left:10px;">= 지그교체</span></div>'
+    html += legend_html
+
+    prev_positions_d0 = None
     for r in range(10):
         shift_name = '주간' if r < 5 else '야간'
         shift_bg = '#E3F2FD' if r < 5 else '#E8EAF6'
         detail_html = format_rotation_items_html(items, r, 'prod', templates, jig_orders_d0)
+
+        # 140행어 위치 시각화
+        hanger_html, curr_positions = format_hanger_positions_html(templates, jig_orders_d0, r, prev_positions_d0)
+        prev_positions_d0 = curr_positions
+
         html += f'''
             <div style="margin:8px 0;padding:10px;background:{shift_bg};border-radius:8px;">
                 <div style="display:flex;align-items:center;gap:15px;margin-bottom:8px;">
@@ -1196,7 +1320,8 @@ def generate_html_report(items, schedule_result):
                     <span style="background:#1976D2;color:white;padding:2px 8px;border-radius:4px;font-size:0.8em;">{shift_name}</span>
                     <span style="color:#666;font-size:0.85em;">지그교체: <b>{jig_changes[r]}</b></span>
                 </div>
-                <div style="display:flex;flex-wrap:wrap;gap:4px;">{detail_html}</div>
+                {hanger_html}
+                <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:5px;">{detail_html}</div>
             </div>'''
 
     # D0→D+1 전환
@@ -1207,10 +1332,18 @@ def generate_html_report(items, schedule_result):
 
     # D+1 회전별 상세
     html += '<h3 style="margin-top:20px;color:#2E7D32;">D+1 생산계획</h3>'
+
+    # D0 마지막 회전의 위치를 D+1 첫 회전과 비교하기 위해 전달
+    prev_positions_d1 = prev_positions_d0  # D0 마지막 위치 → D+1 첫 회전 비교
     for r in range(10):
         shift_name = '주간' if r < 5 else '야간'
         shift_bg = '#E8F5E9' if r < 5 else '#F1F8E9'
         detail_html = format_rotation_items_html(items, r, 'prod1', templates_d1, jig_orders_d1)
+
+        # 140행어 위치 시각화
+        hanger_html, curr_positions = format_hanger_positions_html(templates_d1, jig_orders_d1, r, prev_positions_d1)
+        prev_positions_d1 = curr_positions
+
         html += f'''
             <div style="margin:8px 0;padding:10px;background:{shift_bg};border-radius:8px;">
                 <div style="display:flex;align-items:center;gap:15px;margin-bottom:8px;">
@@ -1218,7 +1351,8 @@ def generate_html_report(items, schedule_result):
                     <span style="background:#388E3C;color:white;padding:2px 8px;border-radius:4px;font-size:0.8em;">{shift_name}</span>
                     <span style="color:#666;font-size:0.85em;">지그교체: <b>{jig_changes_d1[r]}</b></span>
                 </div>
-                <div style="display:flex;flex-wrap:wrap;gap:4px;">{detail_html}</div>
+                {hanger_html}
+                <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:5px;">{detail_html}</div>
             </div>'''
 
     # D+1→D+2 전환
@@ -1229,10 +1363,18 @@ def generate_html_report(items, schedule_result):
 
     # D+2 회전별 상세
     html += '<h3 style="margin-top:20px;color:#E65100;">D+2 생산계획</h3>'
+
+    # D+1 마지막 회전의 위치를 D+2 첫 회전과 비교
+    prev_positions_d2 = prev_positions_d1  # D+1 마지막 위치 → D+2 첫 회전 비교
     for r in range(10):
         shift_name = '주간' if r < 5 else '야간'
         shift_bg = '#FFF3E0' if r < 5 else '#FBE9E7'
         detail_html = format_rotation_items_html(items, r, 'prod2', templates_d2_box, jig_orders_d2)
+
+        # 140행어 위치 시각화
+        hanger_html, curr_positions = format_hanger_positions_html(templates_d2_box, jig_orders_d2, r, prev_positions_d2)
+        prev_positions_d2 = curr_positions
+
         html += f'''
             <div style="margin:8px 0;padding:10px;background:{shift_bg};border-radius:8px;">
                 <div style="display:flex;align-items:center;gap:15px;margin-bottom:8px;">
@@ -1240,7 +1382,8 @@ def generate_html_report(items, schedule_result):
                     <span style="background:#F57C00;color:white;padding:2px 8px;border-radius:4px;font-size:0.8em;">{shift_name}</span>
                     <span style="color:#666;font-size:0.85em;">지그교체: <b>{jig_changes_d2_box[r]}</b></span>
                 </div>
-                <div style="display:flex;flex-wrap:wrap;gap:4px;">{detail_html}</div>
+                {hanger_html}
+                <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:5px;">{detail_html}</div>
             </div>'''
 
     html += '''
