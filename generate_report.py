@@ -284,10 +284,11 @@ def try_adjust_template(base_tmpl, base_order, target_grp, delta, budget):
 def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
                     prev_template=None, prev_order=None, prev_color=None):
     """
-    제약조건 기반 스케줄링 v2
-    - 제약1: 지그교체 150/시프트 (엄격)
+    제약조건 기반 스케줄링 v3
+    - 제약1: 지그교체 150/시프트 (적극 활용)
     - 제약2: 회전별 수요 충족
-    - 목적: 컬러교환 최소화
+    - 목적: 컬러교환 최소화 (목표 ~30회/일)
+    - 첫 회전 전환비용 = 0 (계산 안 함)
     """
 
     def get_grp_main_color_for_day(grp):
@@ -300,43 +301,198 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
             return max(color_demand.keys(), key=lambda c: color_demand[c])
         return None
 
-    # 1. 템플릿 계산 (전체 수요 기반, 하루 동안 고정)
+    def get_grp_main_color_for_rotation(grp, rotation):
+        """특정 회전에서 지그그룹의 주 컬러"""
+        color_demand = defaultdict(int)
+        for x in items:
+            if x['grp'] == grp:
+                color_demand[x['clr']] += x.get(day_key, [0]*10)[rotation]
+        if color_demand:
+            return max(color_demand.keys(), key=lambda c: color_demand[c])
+        return None
+
+    # 1. 기본 템플릿 계산 (전체 수요 기반)
     base_tmpl = calculate_template_for_demands(items, [(day_key, 1.0)])
 
-    # 컬러 정보 수집
+    # 2. 컬러 정보 수집 및 그룹핑
     grp_colors = {}
     for g in base_tmpl:
         grp_colors[g] = get_grp_main_color_for_day(g)
 
-    # 2. 최적 순서 결정 (컬러 그룹핑, 첫 회전에서 한 번만)
-    if prev_order and prev_template:
-        # 이전 날 순서 기반으로 시작, 컬러 연속성 고려
-        base_order = get_optimal_order_for_colors(base_tmpl, grp_colors, prev_color)
-    else:
-        base_order = get_optimal_order_for_colors(base_tmpl, grp_colors, None)
+    # 3. 컬러별로 지그그룹 분류
+    color_to_grps = defaultdict(list)
+    for g, clr in grp_colors.items():
+        if clr and g in base_tmpl and base_tmpl[g] > 0:
+            color_to_grps[clr].append(g)
 
-    # 3. 이전 날과의 전환 비용 계산
-    if prev_template and prev_order:
-        prev_pos = order_to_positions(prev_template, prev_order)
-        new_pos = order_to_positions(base_tmpl, base_order)
-        transition_cost = calc_position_changes(prev_pos, new_pos)
-    else:
-        transition_cost = sum(base_tmpl.values())  # 첫날은 전체 설정
+    # 4. 최적 순서 결정 - 컬러 블록으로 그룹핑
+    # 같은 컬러끼리 연속 배치하여 컬러교환 최소화
+    def get_color_block_order(tmpl, grp_colors, prev_last_color=None):
+        """컬러 블록 단위로 순서 결정"""
+        # 컬러별 총 행어수 계산
+        color_hangers = defaultdict(int)
+        for g, clr in grp_colors.items():
+            if g in tmpl and tmpl[g] > 0:
+                color_hangers[clr] += tmpl[g]
 
-    # 결과 저장 - 하루 동안 동일한 템플릿/순서 유지
-    templates = [base_tmpl.copy() for _ in range(10)]
-    jig_orders = [list(base_order) for _ in range(10)]
+        # 컬러 순서 결정 (이전 마지막 컬러 → 큰 컬러 순)
+        sorted_colors = sorted(color_hangers.keys(), key=lambda c: -color_hangers[c])
+
+        if prev_last_color and prev_last_color in sorted_colors:
+            sorted_colors.remove(prev_last_color)
+            sorted_colors.insert(0, prev_last_color)
+
+        # 순서 생성
+        order = []
+        for clr in sorted_colors:
+            # 해당 컬러의 지그그룹들 (행어 수 내림차순)
+            clr_grps = [g for g in grp_colors if grp_colors[g] == clr and g in tmpl and tmpl[g] > 0]
+            clr_grps.sort(key=lambda g: -tmpl[g])
+            order.extend(clr_grps)
+
+        return order
+
+    # 시작 순서
+    if prev_color:
+        base_order = get_color_block_order(base_tmpl, grp_colors, prev_color)
+    else:
+        base_order = get_color_block_order(base_tmpl, grp_colors, None)
+
+    # 결과 저장
+    templates = []
+    jig_orders = []
     jig_changes = [0] * 10
 
-    # 첫 회전에만 전환 비용 적용
-    jig_changes[0] = transition_cost
+    # 시프트별 예산
+    day_budget_left = JIG_BUDGET_DAY
+    night_budget_left = JIG_BUDGET_NIGHT
 
-    # 시프트 전환 시 비용 (5회전 → 6회전)
-    # 템플릿이 같으므로 0
+    # 이전 상태 (첫 회전은 비용 0)
+    prev_positions = None  # 첫 회전은 전환비용 계산 안 함
 
-    # 예산 체크 (첫 회전 전환이 예산 내인지)
-    day_budget_used = transition_cost if transition_cost <= JIG_BUDGET_DAY else JIG_BUDGET_DAY
-    night_budget_used = 0
+    for r in range(10):
+        is_day_shift = r < 5
+        budget_left = day_budget_left if is_day_shift else night_budget_left
+
+        # 이 회전의 수요 기반 템플릿 계산
+        rotation_demand = defaultdict(int)
+        for x in items:
+            if x['grp']:
+                rotation_demand[x['grp']] += x.get(day_key, [0]*10)[r]
+
+        # 수요가 있는 그룹만 포함
+        active_grps = [g for g in base_tmpl if rotation_demand[g] > 0]
+
+        if not active_grps:
+            # 수요 없으면 기본 템플릿 사용
+            curr_tmpl = base_tmpl.copy()
+            curr_order = list(base_order)
+        else:
+            # 수요 비율로 템플릿 조정
+            total_demand = sum(rotation_demand[g] for g in active_grps)
+            curr_tmpl = {}
+            remaining = HANGERS
+
+            # 수요 순으로 배분
+            sorted_grps = sorted(active_grps, key=lambda g: -rotation_demand[g])
+            for g in sorted_grps:
+                if remaining <= 0:
+                    break
+                max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+                ideal = max(1, int(HANGERS * rotation_demand[g] / total_demand))
+                alloc = min(max_h, ideal, remaining)
+                curr_tmpl[g] = alloc
+                remaining -= alloc
+
+            # 남은 행어 배분 (pcs=2 우선)
+            if remaining > 0:
+                for g in sorted_grps:
+                    if remaining <= 0:
+                        break
+                    if JIG_INVENTORY[g]['pcs'] >= 2:
+                        max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+                        add = min(remaining, max_h - curr_tmpl.get(g, 0))
+                        if add > 0:
+                            curr_tmpl[g] = curr_tmpl.get(g, 0) + add
+                            remaining -= add
+
+            # 아직 남으면 일반 배분
+            if remaining > 0:
+                for g in sorted_grps:
+                    if remaining <= 0:
+                        break
+                    max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+                    add = min(remaining, max_h - curr_tmpl.get(g, 0))
+                    if add > 0:
+                        curr_tmpl[g] = curr_tmpl.get(g, 0) + add
+                        remaining -= add
+
+            # 하루 기준 컬러 정보 사용 (안정적 순서 유지)
+            # 회전별 컬러가 아닌 하루 전체 주 컬러로 순서 결정
+            rot_grp_colors = {}
+            for g in curr_tmpl:
+                rot_grp_colors[g] = grp_colors.get(g)  # 하루 기준 주 컬러
+
+            # 이전 회전 마지막 컬러 확인
+            if r > 0 and jig_orders:
+                prev_order_list = jig_orders[-1]
+                if prev_order_list:
+                    last_g = prev_order_list[-1]
+                    prev_last_color = grp_colors.get(last_g) if last_g else None
+                else:
+                    prev_last_color = prev_color
+            else:
+                prev_last_color = prev_color
+
+            # 이전 회전 순서 최대한 유지 (안정성)
+            if r > 0 and jig_orders:
+                prev_order_list = jig_orders[-1]
+                # 이전 순서에서 현재 템플릿에 있는 그룹만 유지
+                curr_order = [g for g in prev_order_list if g in curr_tmpl and curr_tmpl[g] > 0]
+                # 새로 추가된 그룹은 컬러 기준으로 적절한 위치에 삽입
+                new_grps = [g for g in curr_tmpl if curr_tmpl[g] > 0 and g not in curr_order]
+                for ng in new_grps:
+                    ng_color = rot_grp_colors.get(ng)
+                    # 같은 컬러 그룹 뒤에 삽입
+                    inserted = False
+                    for i, og in enumerate(curr_order):
+                        if rot_grp_colors.get(og) == ng_color:
+                            curr_order.insert(i+1, ng)
+                            inserted = True
+                            break
+                    if not inserted:
+                        curr_order.append(ng)
+            else:
+                # 첫 회전: 컬러 블록 순서
+                curr_order = get_color_block_order(curr_tmpl, rot_grp_colors, prev_last_color)
+
+        # 지그 교체 계산 (첫 회전은 0)
+        curr_positions = order_to_positions(curr_tmpl, curr_order)
+
+        if prev_positions is not None:
+            changes = calc_position_changes(prev_positions, curr_positions)
+
+            # 예산 체크
+            if changes <= budget_left:
+                jig_changes[r] = changes
+                if is_day_shift:
+                    day_budget_left -= changes
+                else:
+                    night_budget_left -= changes
+            else:
+                # 예산 초과시 이전 템플릿/순서 유지
+                if templates:
+                    curr_tmpl = templates[-1].copy()
+                    curr_order = list(jig_orders[-1])
+                    curr_positions = order_to_positions(curr_tmpl, curr_order)
+                jig_changes[r] = 0
+        else:
+            # 첫 회전: 전환비용 0
+            jig_changes[r] = 0
+
+        templates.append(curr_tmpl)
+        jig_orders.append(curr_order)
+        prev_positions = curr_positions
 
     # 생산량 배정
     rotation_color_detail = [{} for _ in range(10)]
