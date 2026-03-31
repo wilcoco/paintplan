@@ -166,7 +166,30 @@ def optimal_template_for_color(items, clr, prev_tmpl, budget_left, day='d0', pre
     else:
         ideal = prev_tmpl.copy() if prev_tmpl else {}
 
+    # pcs=2 지그그룹 최소 배치 보장 (생산량 최대화)
+    # 해당 지그그룹에 수요가 있으면 최소 max_hangers의 50% 이상 배치
+    for g, info in JIG_INVENTORY.items():
+        if info['pcs'] >= 2 and all_grp_demand.get(g, 0) > 0:
+            min_hangers = info['max_jigs'] // JIGS_PER_HANGER // 2  # 최소 50%
+            current = ideal.get(g, 0)
+            if current < min_hangers:
+                ideal[g] = min_hangers
+
     s = sum(ideal.values())
+
+    # 140행어 초과 시 pcs=1 지그그룹에서 축소
+    while s > HANGERS:
+        # pcs=1이고 배치가 큰 그룹에서 줄이기
+        pcs1_grps = [(g, ideal[g]) for g in ideal if JIG_INVENTORY[g]['pcs'] == 1 and ideal[g] > 1]
+        if not pcs1_grps:
+            break
+        pcs1_grps.sort(key=lambda x: -x[1])
+        g = pcs1_grps[0][0]
+        rm = min(s - HANGERS, ideal[g] - 1)
+        ideal[g] -= rm
+        s -= rm
+
+    # 아직 부족하면 수요 기반으로 채우기
     if s < HANGERS:
         remaining_grps = sorted(all_grp_demand, key=lambda g: -all_grp_demand[g])
         for g in remaining_grps:
@@ -179,7 +202,10 @@ def optimal_template_for_color(items, clr, prev_tmpl, budget_left, day='d0', pre
                 s += add
 
     if s < HANGERS:
-        for g in JIG_INVENTORY:
+        # 잔여 행어는 pcs가 높은 지그그룹 우선 배치
+        sorted_by_pcs = sorted(JIG_INVENTORY.keys(),
+                               key=lambda g: (-JIG_INVENTORY[g]['pcs'], -all_grp_demand.get(g, 0)))
+        for g in sorted_by_pcs:
             if s >= HANGERS: break
             mx = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
             current = ideal.get(g, 0)
