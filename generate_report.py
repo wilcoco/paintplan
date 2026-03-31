@@ -456,7 +456,10 @@ def schedule_day(items, day_key, demand_key, prod_key, start_stock_key,
         return None
 
     # 지그 순서를 컬러별로 재정렬 (컬러 교환 최소화)
+    # 단, 이전 회전 순서를 최대한 유지하면서 컬러 그룹핑
     prev_rot_last_color_for_sort = prev_day_color
+    prev_rot_order_for_sort = prev_day_order  # 이전 회전의 순서 추적
+
     for r in range(10):
         tmpl = templates[r]
         order = jig_orders[r] if jig_orders[r] else sorted(tmpl.keys())
@@ -473,24 +476,51 @@ def schedule_day(items, day_key, demand_key, prod_key, start_stock_key,
             if clr:
                 color_groups[clr].append(g)
 
-        # 이전 회전 마지막 컬러 → 같은 컬러 먼저, 그 다음 다른 컬러들
+        # ★ 이전 회전 순서를 최대한 유지하면서 컬러별로 그룹핑
         new_order = []
-        used_colors = set()
+        used_grps = set()
 
-        # 1. 이전 컬러와 같은 컬러의 지그그룹들 먼저
-        if prev_rot_last_color_for_sort and prev_rot_last_color_for_sort in color_groups:
-            for g in color_groups[prev_rot_last_color_for_sort]:
-                new_order.append(g)
-            used_colors.add(prev_rot_last_color_for_sort)
+        if prev_rot_order_for_sort:
+            # 이전 회전의 순서를 따라가면서, 현재 회전에도 있는 그룹만 추가
+            # 같은 컬러끼리 연속되도록 조정
+            prev_colors_order = []  # 이전 순서의 컬러 순서
+            for g in prev_rot_order_for_sort:
+                if g in grp_colors and grp_colors[g]:
+                    clr = grp_colors[g]
+                    if clr not in prev_colors_order:
+                        prev_colors_order.append(clr)
 
-        # 2. 나머지 컬러들 (수요 많은 컬러 순)
-        remaining_colors = [c for c in color_groups.keys() if c not in used_colors]
-        # 컬러별 총 행어수로 정렬
-        remaining_colors.sort(key=lambda c: -sum(tmpl.get(g, 0) for g in color_groups[c]))
+            # 이전 컬러 순서대로 현재 지그그룹 배치
+            for clr in prev_colors_order:
+                if clr in color_groups:
+                    for g in color_groups[clr]:
+                        if g not in used_grps:
+                            new_order.append(g)
+                            used_grps.add(g)
 
-        for clr in remaining_colors:
-            for g in color_groups[clr]:
-                new_order.append(g)
+            # 이전에 없던 새 컬러들 추가
+            remaining_colors = [c for c in color_groups.keys() if c not in prev_colors_order]
+            remaining_colors.sort(key=lambda c: -sum(tmpl.get(g, 0) for g in color_groups[c]))
+            for clr in remaining_colors:
+                for g in color_groups[clr]:
+                    if g not in used_grps:
+                        new_order.append(g)
+                        used_grps.add(g)
+        else:
+            # 첫 회전: 이전 컬러 → 같은 컬러 먼저
+            if prev_rot_last_color_for_sort and prev_rot_last_color_for_sort in color_groups:
+                for g in color_groups[prev_rot_last_color_for_sort]:
+                    new_order.append(g)
+                    used_grps.add(g)
+
+            # 나머지 컬러들 (수요 많은 컬러 순)
+            remaining_colors = [c for c in color_groups.keys() if c != prev_rot_last_color_for_sort]
+            remaining_colors.sort(key=lambda c: -sum(tmpl.get(g, 0) for g in color_groups[c]))
+            for clr in remaining_colors:
+                for g in color_groups[clr]:
+                    if g not in used_grps:
+                        new_order.append(g)
+                        used_grps.add(g)
 
         # 컬러 없는 지그그룹 추가
         for g in order:
@@ -498,11 +528,39 @@ def schedule_day(items, day_key, demand_key, prod_key, start_stock_key,
                 new_order.append(g)
 
         jig_orders[r] = new_order
+        prev_rot_order_for_sort = new_order  # 다음 회전 비교용
 
         # 다음 회전을 위해 마지막 컬러 저장
         if new_order:
             last_g = new_order[-1]
             prev_rot_last_color_for_sort = grp_colors.get(last_g)
+
+    # ★ 컬러별 재정렬 후 지그교체 수 재계산 (실제 순서 기준)
+    def order_to_positions(tmpl, order):
+        """순서와 템플릿을 140개 위치 배열로 변환"""
+        positions = []
+        for g in order:
+            if g in tmpl and tmpl[g] > 0:
+                positions.extend([g] * tmpl[g])
+        while len(positions) < HANGERS:
+            positions.append(None)
+        return positions[:HANGERS]
+
+    # 이전 회전 위치 (전날 마지막 또는 None)
+    if prev_day_template and prev_day_order:
+        prev_positions = order_to_positions(prev_day_template, prev_day_order)
+    else:
+        prev_positions = None
+
+    for r in range(10):
+        curr_positions = order_to_positions(templates[r], jig_orders[r])
+        if prev_positions:
+            changes = sum(1 for i in range(HANGERS) if prev_positions[i] != curr_positions[i])
+            jig_changes[r] = changes
+        else:
+            # 첫 회전: 모든 위치가 새로 설정
+            jig_changes[r] = sum(templates[r].values()) if templates[r] else 0
+        prev_positions = curr_positions
 
     prev_rot_last_color = prev_day_color  # 전날 마지막 컬러
     total_cc = 0
