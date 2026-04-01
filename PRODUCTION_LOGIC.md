@@ -9,8 +9,8 @@
 | ROTATIONS_PER_DAY | 10 | 일일 회전 수 |
 | DAY_SHIFT | 1-5회전 | 주간 |
 | NIGHT_SHIFT | 6-10회전 | 야간 |
-| JIG_BUDGET_DAY | 150 | 주간 지그교체 예산 |
-| JIG_BUDGET_NIGHT | 150 | 야간 지그교체 예산 |
+| HANGER_BUDGET_DAY | 150 | 주간 행어교체 예산 |
+| HANGER_BUDGET_NIGHT | 150 | 야간 행어교체 예산 |
 | COLOR_CHANGE_LOSS | 6 | 컬러교환 손실 (3빈행어 × 2지그) |
 
 ## 2. 지그 그룹
@@ -42,7 +42,7 @@
 
 ### 3.0 최적화 프레임워크
 **제약조건 (Hard Constraints):**
-1. 지그교체 예산: 주간 150개, 야간 150개 **절대 초과 불가**
+1. 행어교체 예산: 주간 150행어, 야간 150행어 **절대 초과 불가**
 2. 수요 충족: 각 회전 시점까지 해당 수요 반드시 충족
 
 **목적함수 (Objective):**
