@@ -125,9 +125,13 @@ def order_to_positions(tmpl, order):
 
 
 def calc_position_changes(pos1, pos2):
-    """두 위치 배열 간 교체 수 계산"""
+    """두 위치 배열 간 교체 수 계산
+    pos1=None이면 0 반환 (D0 1회전: 전날 지그 그대로 사용 가정)
+    """
     if not pos1:
-        return sum(1 for p in pos2 if p is not None) if pos2 else 0
+        return 0  # 전날 지그 그대로 사용
+    if not pos2:
+        return 0
     return sum(1 for i in range(HANGERS) if pos1[i] != pos2[i])
 
 
@@ -426,8 +430,13 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
     day_budget_left = HANGER_BUDGET_DAY
     night_budget_left = HANGER_BUDGET_NIGHT
 
-    # 이전 상태 (첫 회전은 비용 0)
-    prev_positions = None
+    # 이전 상태
+    # - D0 첫 회전: 전날 지그 그대로 사용 가정 → 지그 교체 0
+    # - D+1/D+2 첫 회전: 전날 마지막 회전과 비교
+    if prev_template and prev_order:
+        prev_positions = order_to_positions(prev_template, prev_order)
+    else:
+        prev_positions = None  # D0: 지그 교체 0
 
     for r in range(10):
         is_day_shift = r < 5
