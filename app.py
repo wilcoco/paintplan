@@ -25,6 +25,23 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload
 
 db = SQLAlchemy(app)
 
+# 전역 에러 핸들러 - 모든 에러를 JSON으로 반환
+@app.errorhandler(Exception)
+def handle_exception(e):
+    import traceback
+    return jsonify({
+        'error': str(e),
+        'traceback': traceback.format_exc()
+    }), 500
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({'error': 'Not found'}), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    return jsonify({'error': 'Internal server error', 'detail': str(e)}), 500
+
 # ============================================
 # Database Models
 # ============================================
