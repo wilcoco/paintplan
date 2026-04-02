@@ -205,20 +205,29 @@
                 return;
             }
 
-            let html = `<table class="table table-sm table-bordered">
-                <thead class="table-light"><tr>
-                    <th>차종</th><th>아이템</th><th>세부</th><th>컬러</th><th>지그</th><th>재고</th>
-                    <th>1H</th><th>2H</th><th>3H</th><th>4H</th><th>5H</th>
-                    <th>6H</th><th>7H</th><th>8H</th><th>9H</th><th>10H</th><th>합계</th>
-                </tr></thead><tbody>`;
+            let html = `<table class="table table-sm table-bordered" style="font-size:11px;">
+                <thead class="table-light">
+                    <tr>
+                        <th rowspan="2">차종</th><th rowspan="2">아이템</th><th rowspan="2">세부</th>
+                        <th rowspan="2">컬러</th><th rowspan="2">지그</th><th rowspan="2">재고</th>
+                        <th colspan="11" style="background:#1565C0;color:white;">D0</th>
+                        <th colspan="11" style="background:#2E7D32;color:white;">D+1</th>
+                        <th colspan="11" style="background:#E65100;color:white;">D+2</th>
+                    </tr>
+                    <tr>
+                        <th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>계</th>
+                        <th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>계</th>
+                        <th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th><th>8</th><th>9</th><th>10</th><th>계</th>
+                    </tr>
+                </thead><tbody>`;
 
             data.forEach(item => {
-                const total = item.demands.reduce((a,b) => a+b, 0);
                 html += `<tr>
                     <td>${item.car_type}</td><td>${item.item_name}</td><td>${item.detail||'-'}</td>
                     <td>${item.color}</td><td>${item.jig_group||'-'}</td><td>${item.stock}</td>
-                    ${item.demands.map(d => `<td>${d||''}</td>`).join('')}
-                    <td><b>${total}</b></td>
+                    ${item.d0.map(d => `<td>${d||''}</td>`).join('')}<td><b>${item.d0_total}</b></td>
+                    ${item.d1.map(d => `<td>${d||''}</td>`).join('')}<td><b>${item.d1_total}</b></td>
+                    ${item.d2.map(d => `<td>${d||''}</td>`).join('')}<td><b>${item.d2_total}</b></td>
                 </tr>`;
             });
             html += '</tbody></table>';

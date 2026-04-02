@@ -433,40 +433,56 @@ def api_upload_demand():
 
 @app.route('/api/demand', methods=['GET'])
 def api_get_demand():
-    """수요 데이터 조회"""
+    """수요 데이터 조회 (D0, D+1, D+2 전체)"""
+    from datetime import timedelta
+
     demand_date = request.args.get('date')
     if not demand_date:
         return jsonify({'error': 'Date required'}), 400
 
-    demands = db.session.query(
-        Item, DailyDemand, Inventory
-    ).join(
-        DailyDemand, Item.id == DailyDemand.item_id
-    ).outerjoin(
-        Inventory, db.and_(
-            Item.id == Inventory.item_id,
-            Inventory.stock_date == demand_date
-        )
-    ).filter(
-        DailyDemand.demand_date == demand_date
-    ).all()
+    base_date = datetime.strptime(demand_date, '%Y-%m-%d').date()
+    d1_date = base_date + timedelta(days=1)
+    d2_date = base_date + timedelta(days=2)
 
-    # Group by item
-    items_dict = {}
-    for item, demand, inv in demands:
-        if item.id not in items_dict:
-            items_dict[item.id] = {
+    # 모든 아이템 조회
+    all_items = Item.query.all()
+    result = []
+
+    for item in all_items:
+        # 재고
+        inv = Inventory.query.filter_by(item_id=item.id, stock_date=base_date).first()
+        stk = inv.quantity if inv else 0
+
+        # D0, D+1, D+2 수요
+        def get_demands(target_date):
+            demands = DailyDemand.query.filter_by(
+                item_id=item.id, demand_date=target_date
+            ).order_by(DailyDemand.rotation).all()
+            result = [0] * 10
+            for d in demands:
+                if 1 <= d.rotation <= 10:
+                    result[d.rotation - 1] = d.quantity
+            return result
+
+        d0 = get_demands(base_date)
+        d1 = get_demands(d1_date)
+        d2 = get_demands(d2_date)
+
+        # 수요가 하나라도 있거나 재고가 있는 아이템만
+        if sum(d0) > 0 or sum(d1) > 0 or sum(d2) > 0 or stk > 0:
+            result.append({
                 'car_type': item.car_type,
                 'item_name': item.item_name,
                 'detail': item.detail,
                 'color': item.color,
                 'jig_group': item.jig_group,
-                'stock': inv.quantity if inv else 0,
-                'demands': [0] * 10
-            }
-        items_dict[item.id]['demands'][demand.rotation - 1] = demand.quantity
+                'stock': stk,
+                'd0': d0, 'd0_total': sum(d0),
+                'd1': d1, 'd1_total': sum(d1),
+                'd2': d2, 'd2_total': sum(d2)
+            })
 
-    return jsonify(list(items_dict.values()))
+    return jsonify(result)
 
 @app.route('/api/schedule', methods=['POST'])
 def api_schedule():
