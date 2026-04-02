@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-D0 생산계획 웹 리포트 생성 v8.16
-- 제약조건: 지그교체 150/시프트, 회전별 수요 충족
-- 목적: 컬러교환 최소화
+D0 생산계획 웹 리포트 생성 v9.1
+- Hard 제약: D0+D+1오전 재고부족 방지, 지그교체 ≤150/시프트, D0-1 지그교체=0
+- Soft 제약: D+1오후/D+2 부족방지, 3일 안전재고
+- 목적함수: 컬러교환 횟수 최소화
+- 전략: 2-Pass 생산배분 (필수생산 → 회전내 컬러통일)
 """
 import openpyxl
 from collections import defaultdict
@@ -97,7 +99,7 @@ def load_data():
 
 
 # ============================================
-# 핵심 스케줄링 함수 v9.0
+# 핵심 스케줄링 함수 v9.1
 # ============================================
 # 목적함수: 컬러교환 최소화
 # Hard 제약: D0 재고부족 방지, 지그교체 ≤150/시프트
@@ -1185,14 +1187,21 @@ def schedule_d0_optimized(items):
     item_deadline = {id(x): calc_deadline(x) for x in items}
 
     # 생산 배분: 컬러 교환 최소화하면서 데드라인 준수
+    # 2-Pass 접근: 1차 - 필수 생산 (긴급/데드라인), 2차 - 선생산 (회전 컬러 통일)
+
+    # 그룹별 남은 용량 추적
+    grp_remaining_cap = [{} for _ in range(10)]
+
     for r in range(10):
         tmpl = templates[r]
         main_clr = rot_main_color.get(r)
 
+        # 1차 패스: 필수 생산 (긴급 + 데드라인) + 주컬러 3일치
         for g, hangers in tmpl.items():
             cap = hangers * JIGS_PER_HANGER * JIG_INVENTORY[g]['pcs']
             grp_items = [x for x in items if x['grp'] == g]
             if not grp_items:
+                grp_remaining_cap[r][g] = 0
                 continue
 
             remaining = cap
@@ -1216,14 +1225,15 @@ def schedule_d0_optimized(items):
                         x['prod'][r] += alloc
                         remaining -= alloc
 
-                # 주컬러 선생산
+                # 주컬러 선생산 (3일치 재고 목표: D0+D+1+D+2)
                 for x in color_items[main_clr]:
                     if remaining <= 0:
                         break
                     stk = item_stock[id(x)] + x['prod'][r]
                     d0_rem = sum(x['d0'][r:])
-                    d1_morning = sum(x.get('d1', [0]*10)[:5])
-                    need = max(0, d0_rem + d1_morning - stk)
+                    d1_tot = sum(x.get('d1', [0]*10))
+                    d2_tot = sum(x.get('d2', [0]*10))
+                    need = max(0, d0_rem + d1_tot + d2_tot - stk)
                     if need > 0:
                         alloc = min(remaining, need)
                         x['prod'][r] += alloc
@@ -1278,6 +1288,182 @@ def schedule_d0_optimized(items):
                             alloc -= item_alloc
                             remaining -= item_alloc
                     colors_used += 1
+
+            # Step 3: 용량 남으면 같은 컬러 계속 생산 (컬러교환 최소화)
+            # 전략: 주컬러를 3일치 초과해서도 생산 → 이미 사용중인 컬러 → 인접회전 컬러 → 기타
+            if remaining > 0:
+                # Step 3a: 주컬러 추가 생산 (3일치 초과해도 생산 - 컬러교환 없음)
+                if main_clr and main_clr in color_items:
+                    for x in color_items[main_clr]:
+                        if remaining <= 0:
+                            break
+                        # 주컬러는 수요가 있는 한 계속 생산 (최대 D0+D1+D2 합계까지)
+                        stk = item_stock[id(x)] + x['prod'][r]
+                        total_demand = sum(x['d0']) + sum(x.get('d1', [0]*10)) + sum(x.get('d2', [0]*10))
+                        need = max(0, total_demand - stk)
+                        if need > 0:
+                            alloc = min(remaining, need)
+                            x['prod'][r] += alloc
+                            remaining -= alloc
+
+                # Step 3b: Step 2에서 이미 생산중인 컬러의 추가 생산 (추가 컬러교환 없음)
+                colors_already_used = [c for c in other_colors
+                                       if any(x['prod'][r] > 0 for x in color_items[c])]
+                for clr in colors_already_used:
+                    if remaining <= 0:
+                        break
+                    for x in color_items[clr]:
+                        if remaining <= 0:
+                            break
+                        stk = item_stock[id(x)] + x['prod'][r]
+                        d0_rem = sum(x['d0'][r:])
+                        d1_tot = sum(x.get('d1', [0]*10))
+                        d2_tot = sum(x.get('d2', [0]*10))
+                        need = max(0, d0_rem + d1_tot + d2_tot - stk)
+                        if need > 0:
+                            alloc = min(remaining, need)
+                            x['prod'][r] += alloc
+                            remaining -= alloc
+
+                # Step 3c: 인접 회전 주컬러 우선 (컬러 연속성)
+                # 이전/다음 회전 주컬러와 같은 컬러를 우선 생산
+                adjacent_colors = []
+                if r > 0:
+                    prev_main = rot_main_color.get(r-1)
+                    if prev_main and prev_main in color_items and prev_main != main_clr:
+                        adjacent_colors.append(prev_main)
+                if r < 9:
+                    next_main = rot_main_color.get(r+1)
+                    if next_main and next_main in color_items and next_main != main_clr:
+                        if next_main not in adjacent_colors:
+                            adjacent_colors.append(next_main)
+
+                for clr in adjacent_colors:
+                    if remaining <= 0:
+                        break
+                    if clr in colors_already_used:
+                        continue  # 이미 처리됨
+                    for x in color_items[clr]:
+                        if remaining <= 0:
+                            break
+                        stk = item_stock[id(x)] + x['prod'][r]
+                        d0_rem = sum(x['d0'][r:])
+                        d1_tot = sum(x.get('d1', [0]*10))
+                        d2_tot = sum(x.get('d2', [0]*10))
+                        need = max(0, d0_rem + d1_tot + d2_tot - stk)
+                        if need > 0:
+                            alloc = min(remaining, need)
+                            x['prod'][r] += alloc
+                            remaining -= alloc
+
+                # Step 3d: 그래도 남으면 나머지 컬러 (필요량 많은 순, 특수컬러 후순위)
+                # 컬러당 필요량 계산
+                color_needs = []
+                for clr in other_colors:
+                    if clr in colors_already_used or clr in adjacent_colors:
+                        continue
+                    total_need = 0
+                    for x in color_items[clr]:
+                        stk = item_stock[id(x)] + x['prod'][r]
+                        d0_rem = sum(x['d0'][r:])
+                        d1_tot = sum(x.get('d1', [0]*10))
+                        d2_tot = sum(x.get('d2', [0]*10))
+                        total_need += max(0, d0_rem + d1_tot + d2_tot - stk)
+                    if total_need > 0:
+                        is_special = 1 if clr.upper() in SPECIAL_COLORS else 0
+                        color_needs.append((clr, total_need, is_special))
+
+                # 필요량 많은 순 (특수컬러는 후순위)
+                color_needs.sort(key=lambda x: (x[2], -x[1]))
+
+                for clr, _, _ in color_needs:
+                    if remaining <= 0:
+                        break
+                    for x in color_items[clr]:
+                        if remaining <= 0:
+                            break
+                        stk = item_stock[id(x)] + x['prod'][r]
+                        d0_rem = sum(x['d0'][r:])
+                        d1_tot = sum(x.get('d1', [0]*10))
+                        d2_tot = sum(x.get('d2', [0]*10))
+                        need = max(0, d0_rem + d1_tot + d2_tot - stk)
+                        if need > 0:
+                            alloc = min(remaining, need)
+                            x['prod'][r] += alloc
+                            remaining -= alloc
+
+            # 남은 용량 저장 (2차 패스용)
+            grp_remaining_cap[r][g] = remaining
+
+        # 2차 패스: 회전 내 다른 그룹과 컬러 통일 (컬러교환 최소화 핵심)
+        # 이 회전에서 생산되고 있는 컬러들 수집
+        rot_colors_used = defaultdict(int)  # color -> total production
+        rot_grp_colors = defaultdict(set)   # color -> set of groups producing it
+        for x in items:
+            if x['prod'][r] > 0:
+                rot_colors_used[x['clr']] += x['prod'][r]
+                rot_grp_colors[x['clr']].add(x['grp'])
+
+        # 남은 용량이 있는 그룹에서 회전 내 주요 컬러 추가 생산
+        if rot_colors_used:
+            # 우선순위: 1) 가장 많은 그룹이 생산하는 컬러, 2) 생산량 많은 컬러
+            dominant_colors = sorted(rot_colors_used.keys(),
+                                   key=lambda c: (-len(rot_grp_colors[c]), -rot_colors_used[c]))
+
+            for g in tmpl.keys():
+                remaining = grp_remaining_cap[r].get(g, 0)
+                if remaining <= 0:
+                    continue
+
+                grp_items = [x for x in items if x['grp'] == g]
+                if not grp_items:
+                    continue
+
+                # 이 그룹의 현재 메인 컬러 확인
+                grp_color_prod = defaultdict(int)
+                for x in grp_items:
+                    grp_color_prod[x['clr']] += x['prod'][r]
+                current_main = max(grp_color_prod.keys(), key=lambda c: grp_color_prod[c]) if grp_color_prod else None
+
+                # 현재 메인 컬러가 있으면 그것만 추가 생산 (컬러교환 방지)
+                if current_main and grp_color_prod[current_main] > 0:
+                    for x in grp_items:
+                        if x['clr'] != current_main:
+                            continue
+                        if remaining <= 0:
+                            break
+                        stk = item_stock[id(x)] + x['prod'][r]
+                        d0_rem = sum(x['d0'][r:])
+                        d1_tot = sum(x.get('d1', [0]*10))
+                        d2_tot = sum(x.get('d2', [0]*10))
+                        need = max(0, d0_rem + d1_tot + d2_tot - stk)
+                        if need > 0:
+                            alloc = min(remaining, need)
+                            x['prod'][r] += alloc
+                            remaining -= alloc
+
+                # 그래도 남으면 회전 내 dominant 컬러 중 하나만 선택
+                if remaining > 0:
+                    for dom_clr in dominant_colors:
+                        if remaining <= 0:
+                            break
+                        # 이 컬러가 다른 그룹들에서도 많이 생산되고 있으면 우선
+                        dom_clr_items = [x for x in grp_items if x['clr'] == dom_clr]
+                        for x in dom_clr_items:
+                            if remaining <= 0:
+                                break
+                            stk = item_stock[id(x)] + x['prod'][r]
+                            d0_rem = sum(x['d0'][r:])
+                            d1_tot = sum(x.get('d1', [0]*10))
+                            d2_tot = sum(x.get('d2', [0]*10))
+                            need = max(0, d0_rem + d1_tot + d2_tot - stk)
+                            if need > 0:
+                                alloc = min(remaining, need)
+                                x['prod'][r] += alloc
+                                remaining -= alloc
+                        # 하나의 dominant 컬러만 추가 (컬러교환 1회로 제한)
+                        if any(x['prod'][r] > 0 for x in dom_clr_items):
+                            break
 
         # 재고 업데이트
         for x in items:
@@ -2106,7 +2292,7 @@ def generate_html_report(items, schedule_result):
 </head>
 <body>
     <div class="container">
-        <h1>D0 생산계획 리포트 v8.16</h1>
+        <h1>D0 생산계획 리포트 v9.1</h1>
         <p>생성일시: {today.strftime("%Y-%m-%d %H:%M:%S")}</p>
 
         <div class="card">
