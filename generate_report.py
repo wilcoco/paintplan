@@ -1151,6 +1151,13 @@ def schedule_d0_optimized(items):
     def get_grp_cap(g, r):
         return templates[r].get(g, 0) * JIGS_PER_HANGER * JIG_INVENTORY[g]['pcs']
 
+    # 컬러별 블록 회전 매핑 (비주컬러 생산 이동용)
+    color_to_rotations = defaultdict(list)
+    for r, clr in rot_main_color.items():
+        if clr:
+            color_to_rotations[clr].append(r)
+
+    # 지그그룹 내 단일 컬러 원칙으로 생산 배분
     for r in range(10):
         tmpl = templates[r]
         main_clr = rot_main_color.get(r)
@@ -1163,21 +1170,21 @@ def schedule_d0_optimized(items):
 
             remaining = cap
             main_items = [x for x in grp_items if x['clr'] == main_clr]
-            other_items = [x for x in grp_items if x['clr'] != main_clr]
 
-            # Step 1: 긴급 필수 (이번 회전에서 재고 부족 발생하는 것만)
-            for x in grp_items:
+            # Step 1: 주컬러만 먼저 생산 (지그그룹 내 단일 컬러)
+            # 주컬러 긴급 필수
+            for x in main_items:
                 if remaining <= 0:
                     break
                 curr_stock = item_stock[id(x)]
                 demand = x['d0'][r]
-                if curr_stock < demand:  # 재고 부족 발생
+                if curr_stock < demand:
                     need = demand - curr_stock
                     alloc = min(remaining, need)
                     x['prod'][r] += alloc
                     remaining -= alloc
 
-            # Step 2: 주컬러 최대한 생산 (D0+D1+D2 수요까지 - 적극적 선생산)
+            # Step 2: 주컬러 선생산 (D0+D1+D2)
             for x in main_items:
                 if remaining <= 0:
                     break
@@ -1185,14 +1192,38 @@ def schedule_d0_optimized(items):
                 d0_rem = sum(x['d0'][r:])
                 d1_tot = sum(x.get('d1', [0]*10))
                 d2_tot = sum(x.get('d2', [0]*10))
-                need = max(0, d0_rem + d1_tot + d2_tot - stk)  # D2까지 선생산
+                need = max(0, d0_rem + d1_tot + d2_tot - stk)
                 if need > 0:
                     alloc = min(remaining, need)
                     x['prod'][r] += alloc
                     remaining -= alloc
 
-            # Step 3: 비주컬러는 재고 부족시만 생산 (최소화)
-            # 주컬러 위주로 운영하여 컬러 교환 최소화
+            # Step 3: 비주컬러 긴급 필수 - 다른 회전으로 이동 불가 시에만 생산
+            # (지그그룹 내 컬러 교환 발생)
+            other_items = [x for x in grp_items if x['clr'] != main_clr]
+            for x in other_items:
+                if remaining <= 0:
+                    break
+                curr_stock = item_stock[id(x)]
+                demand = x['d0'][r]
+                if curr_stock < demand:
+                    # 이 회전에서 반드시 생산해야 하는지 확인
+                    # (이전 회전에서 이미 부족이 발생했거나, 이번이 마지막 기회)
+                    need = demand - curr_stock
+                    # 해당 컬러의 다른 회전에서 생산 가능한지 확인
+                    item_clr = x['clr']
+                    can_defer = False
+                    for future_r in range(r + 1, 10):
+                        if rot_main_color.get(future_r) == item_clr:
+                            # 미래 회전에서 이 컬러가 주컬러면 거기서 생산 가능
+                            can_defer = True
+                            break
+
+                    if not can_defer:
+                        # 미룰 수 없으면 지금 생산 (컬러 교환 감수)
+                        alloc = min(remaining, need)
+                        x['prod'][r] += alloc
+                        remaining -= alloc
 
         # 재고 업데이트
         for x in items:
