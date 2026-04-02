@@ -1160,13 +1160,31 @@ def schedule_d0_optimized(items):
     def get_grp_cap(g, r):
         return templates[r].get(g, 0) * JIGS_PER_HANGER * JIG_INVENTORY[g]['pcs']
 
-    # 컬러별 블록 회전 매핑 (비주컬러 생산 이동용)
+    # 컬러별 블록 회전 매핑
     color_to_rotations = defaultdict(list)
     for r, clr in rot_main_color.items():
         if clr:
             color_to_rotations[clr].append(r)
 
-    # 지그그룹 내 단일 컬러 원칙으로 생산 배분
+    # 아이템별 데드라인 계산 (D0 + D+1 오전까지 부족 발생 회전)
+    def calc_deadline(x):
+        """D0+D+1오전(15회전) 내 부족 발생 시점 반환, 없으면 15"""
+        stk = x.get('stk', 0)
+        # D0 10회전
+        for r in range(10):
+            stk -= x['d0'][r]
+            if stk < 0:
+                return r  # D0 r회전에서 부족
+        # D+1 오전 5회전
+        for r in range(5):
+            stk -= x.get('d1', [0]*10)[r]
+            if stk < 0:
+                return 10 + r  # D+1 r회전에서 부족
+        return 15  # 부족 없음
+
+    item_deadline = {id(x): calc_deadline(x) for x in items}
+
+    # 생산 배분: 컬러 교환 최소화하면서 데드라인 준수
     for r in range(10):
         tmpl = templates[r]
         main_clr = rot_main_color.get(r)
@@ -1178,61 +1196,88 @@ def schedule_d0_optimized(items):
                 continue
 
             remaining = cap
-            main_items = [x for x in grp_items if x['clr'] == main_clr]
 
-            # Step 1: 주컬러만 먼저 생산 (지그그룹 내 단일 컬러)
-            # 주컬러 긴급 필수
-            for x in main_items:
-                if remaining <= 0:
-                    break
-                curr_stock = item_stock[id(x)]
-                demand = x['d0'][r]
-                if curr_stock < demand:
-                    need = demand - curr_stock
-                    alloc = min(remaining, need)
-                    x['prod'][r] += alloc
-                    remaining -= alloc
+            # 컬러별로 그룹화
+            color_items = defaultdict(list)
+            for x in grp_items:
+                color_items[x['clr']].append(x)
 
-            # Step 2: 주컬러 선생산 (D0+D1+D2)
-            for x in main_items:
-                if remaining <= 0:
-                    break
-                stk = item_stock[id(x)] + x['prod'][r]
-                d0_rem = sum(x['d0'][r:])
-                d1_tot = sum(x.get('d1', [0]*10))
-                d2_tot = sum(x.get('d2', [0]*10))
-                need = max(0, d0_rem + d1_tot + d2_tot - stk)
-                if need > 0:
-                    alloc = min(remaining, need)
-                    x['prod'][r] += alloc
-                    remaining -= alloc
-
-            # Step 3: 비주컬러 긴급 필수 - 다른 회전으로 이동 불가 시에만 생산
-            # (지그그룹 내 컬러 교환 발생)
-            other_items = [x for x in grp_items if x['clr'] != main_clr]
-            for x in other_items:
-                if remaining <= 0:
-                    break
-                curr_stock = item_stock[id(x)]
-                demand = x['d0'][r]
-                if curr_stock < demand:
-                    # 이 회전에서 반드시 생산해야 하는지 확인
-                    # (이전 회전에서 이미 부족이 발생했거나, 이번이 마지막 기회)
-                    need = demand - curr_stock
-                    # 해당 컬러의 다른 회전에서 생산 가능한지 확인
-                    item_clr = x['clr']
-                    can_defer = False
-                    for future_r in range(r + 1, 10):
-                        if rot_main_color.get(future_r) == item_clr:
-                            # 미래 회전에서 이 컬러가 주컬러면 거기서 생산 가능
-                            can_defer = True
-                            break
-
-                    if not can_defer:
-                        # 미룰 수 없으면 지금 생산 (컬러 교환 감수)
+            # Step 1: 주컬러 아이템 먼저 (컬러 교환 없음)
+            if main_clr and main_clr in color_items:
+                for x in color_items[main_clr]:
+                    if remaining <= 0:
+                        break
+                    # 긴급 필수 (이번 회전에서 부족)
+                    curr_stock = item_stock[id(x)]
+                    demand = x['d0'][r]
+                    if curr_stock < demand:
+                        need = demand - curr_stock
                         alloc = min(remaining, need)
                         x['prod'][r] += alloc
                         remaining -= alloc
+
+                # 주컬러 선생산
+                for x in color_items[main_clr]:
+                    if remaining <= 0:
+                        break
+                    stk = item_stock[id(x)] + x['prod'][r]
+                    d0_rem = sum(x['d0'][r:])
+                    d1_morning = sum(x.get('d1', [0]*10)[:5])
+                    need = max(0, d0_rem + d1_morning - stk)
+                    if need > 0:
+                        alloc = min(remaining, need)
+                        x['prod'][r] += alloc
+                        remaining -= alloc
+
+            # Step 2: 비주컬러 - 데드라인 임박한 것만 생산
+            # 컬러 교환 비용 순으로 정렬 (일반 < 특수)
+            other_colors = [c for c in color_items.keys() if c != main_clr]
+            # 특수컬러 뒤로 (교환 비용 높음)
+            other_colors.sort(key=lambda c: 1 if c.upper() in SPECIAL_COLORS else 0)
+
+            colors_used = 1 if main_clr else 0  # 사용된 컬러 수
+
+            for clr in other_colors:
+                if remaining <= 0:
+                    break
+
+                clr_items = color_items[clr]
+                clr_need = 0
+
+                for x in clr_items:
+                    curr_stock = item_stock[id(x)]
+                    # 이번 회전까지 생산해야 데드라인 맞추는지 확인
+                    deadline = item_deadline[id(x)]
+                    if deadline <= r:
+                        # 이미 지났으면 즉시 생산
+                        demand = x['d0'][r]
+                        if curr_stock < demand:
+                            clr_need += demand - curr_stock
+                    elif deadline <= 10 + 5:  # D+1 오전까지
+                        # 데드라인까지 남은 회전에서 생산 가능한지 확인
+                        # 해당 컬러의 주컬러 회전이 데드라인 전에 있으면 거기서 생산
+                        future_main_rots = [fr for fr in color_to_rotations.get(clr, [])
+                                           if r < fr < deadline and fr < 10]
+                        if not future_main_rots:
+                            # 미룰 수 없으면 지금 생산
+                            demand = x['d0'][r]
+                            if curr_stock < demand:
+                                clr_need += demand - curr_stock
+
+                if clr_need > 0:
+                    alloc = min(remaining, clr_need)
+                    # 필요량을 아이템별로 배분
+                    for x in clr_items:
+                        if alloc <= 0:
+                            break
+                        curr_stock = item_stock[id(x)]
+                        demand = x['d0'][r]
+                        if curr_stock < demand:
+                            item_alloc = min(alloc, demand - curr_stock)
+                            x['prod'][r] += item_alloc
+                            alloc -= item_alloc
+                            remaining -= item_alloc
+                    colors_used += 1
 
         # 재고 업데이트
         for x in items:
