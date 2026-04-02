@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-D0 생산계획 웹 리포트 생성 v9.1
+D0 생산계획 웹 리포트 생성 v9.2
 - Hard 제약: D0+D+1오전 재고부족 방지, 지그교체 ≤150/시프트, D0-1 지그교체=0
 - Soft 제약: D+1오후/D+2 부족방지, 3일 안전재고
 - 목적함수: 컬러교환 횟수 최소화
@@ -99,15 +99,27 @@ def load_data():
 
 
 # ============================================
-# 핵심 스케줄링 함수 v9.1
+# 핵심 스케줄링 함수 v9.3
 # ============================================
 # 목적함수: 컬러교환 최소화
+# v9.3: 결정론적 알고리즘 (sorted + tie-breaker)
 # Hard 제약: D0 재고부족 방지, 지그교체 ≤150/시프트
 # Soft 제약: D+1 부족방지 > D+2 부족방지 > 3일 안전재고
 # ============================================
 
 # 특수컬러 (15행어=30지그 비용)
 SPECIAL_COLORS = {'MGG', 'T4M', 'UMA', 'ZRM', 'ISM', 'MRM'}
+
+# 지그그룹 클러스터 (컬러 공유 기반)
+# 같은 클러스터 = 같은 컬러 생산 가능성 높음
+JIG_CLUSTERS = {
+    'TH': ['A', 'H'],           # TH계열: 5컬러 100% 공유
+    'NQ5': ['B', 'B2', 'I'],    # NQ5계열: 9컬러 공유
+    'JX': ['D', 'E', 'F', 'G'], # JX/AX계열: 6컬러 공유
+    'OV': ['C'],                # OV1: 독립
+}
+GRP_TO_CLUSTER = {g: c for c, grps in JIG_CLUSTERS.items() for g in grps}
+CLUSTER_ORDER = {'TH': 0, 'NQ5': 1, 'OV': 2, 'JX': 3}  # 클러스터 배치 순서
 
 def get_color_change_cost(from_color):
     """컬러교환 시 빈행어 수 (이전 컬러 기준)"""
@@ -144,7 +156,7 @@ def get_optimal_order_for_colors(tmpl, grp_colors, prev_last_color):
     """
     # 컬러별 지그그룹 묶기
     color_groups = defaultdict(list)
-    for g, clr in grp_colors.items():
+    for g, clr in sorted(grp_colors.items()):
         if g in tmpl and tmpl[g] > 0:
             color_groups[clr].append(g)
 
@@ -160,7 +172,7 @@ def get_optimal_order_for_colors(tmpl, grp_colors, prev_last_color):
 
     # 2. 나머지 컬러들 (행어 합계 많은 순)
     remaining = [(clr, sum(tmpl.get(g, 0) for g in grps))
-                 for clr, grps in color_groups.items() if clr not in used_colors]
+                 for clr, grps in sorted(color_groups.items()) if clr not in used_colors]
     remaining.sort(key=lambda x: -x[1])
 
     for clr, _ in remaining:
@@ -289,7 +301,7 @@ def try_adjust_template(base_tmpl, base_order, target_grp, delta, budget):
 
     # 순서 결정 (기존 순서 유지, 새 그룹은 뒤에)
     new_order = [g for g in base_order if g in new_tmpl and new_tmpl[g] > 0]
-    for g in new_tmpl:
+    for g in sorted(new_tmpl.keys()):
         if g not in new_order and new_tmpl[g] > 0:
             new_order.append(g)
 
@@ -360,16 +372,16 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
             need = max(0, d0_total - stk)
             color_need[clr] += need
 
-        # 생산 필요량이 가장 큰 컬러 선택
+        # 생산 필요량이 가장 큰 컬러 선택 (tie-break: 알파벳순)
         if color_need and max(color_need.values()) > 0:
-            return max(color_need.keys(), key=lambda c: color_need[c])
+            return max(color_need.keys(), key=lambda c: (color_need[c], c))
 
         # 모두 재고로 커버되면 수요 기반
         color_demand = defaultdict(int)
         for x in grp_items:
             color_demand[x['clr']] += sum(x.get(day_key, [0]*10))
         if color_demand:
-            return max(color_demand.keys(), key=lambda c: color_demand[c])
+            return max(color_demand.keys(), key=lambda c: (color_demand[c], c))
         return None
 
     # 3. 소량 그룹 제외 (E, F, G - 수요 미미)
@@ -381,7 +393,7 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
 
     # 5. 컬러 정보 수집 (수요 기반 - 컬러교환 최소화)
     grp_colors = {}
-    for g in base_tmpl:
+    for g in sorted(base_tmpl.keys()):
         grp_colors[g] = get_grp_main_color_for_day(g)
 
     # 6. 회전별 주컬러 계산 (지그예산 활용 위해)
@@ -391,7 +403,8 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
         for x in active_items:
             color_demand[x['clr']] += x.get(day_key, [0]*10)[r]
         if color_demand:
-            rotation_main_colors.append(max(color_demand.keys(), key=lambda c: color_demand[c]))
+            # tie-break: 알파벳순 (determinism)
+            rotation_main_colors.append(max(color_demand.keys(), key=lambda c: (color_demand[c], c)))
         else:
             rotation_main_colors.append(None)
 
@@ -399,7 +412,7 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
     def get_color_block_order(tmpl, grp_colors, prev_last_color=None):
         """컬러 블록 단위로 순서 결정"""
         color_hangers = defaultdict(int)
-        for g, clr in grp_colors.items():
+        for g, clr in sorted(grp_colors.items()):
             if g in tmpl and tmpl[g] > 0 and clr:
                 color_hangers[clr] += tmpl[g]
 
@@ -411,7 +424,7 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
 
         order = []
         for clr in sorted_colors:
-            clr_grps = [g for g in grp_colors if grp_colors[g] == clr and g in tmpl and tmpl[g] > 0]
+            clr_grps = [g for g in sorted(grp_colors.keys()) if grp_colors[g] == clr and g in tmpl and tmpl[g] > 0]
             clr_grps.sort(key=lambda g: -tmpl[g])
             order.extend(clr_grps)
 
@@ -450,8 +463,8 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
         # 이 회전의 목표 템플릿 (주컬러 그룹 강화)
         target_tmpl = base_tmpl.copy()
         if rot_main_color:
-            main_color_grps = [g for g in target_tmpl if grp_colors.get(g) == rot_main_color]
-            other_grps = [g for g in target_tmpl if grp_colors.get(g) != rot_main_color]
+            main_color_grps = sorted([g for g in target_tmpl if grp_colors.get(g) == rot_main_color])
+            other_grps = sorted([g for g in target_tmpl if grp_colors.get(g) != rot_main_color])
 
             # 주컬러 그룹에 20행어 추가 목표
             transfer = 20
@@ -479,7 +492,7 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
 
             # 변경 필요량 계산
             changes_needed = []
-            for g in set(curr_tmpl.keys()) | set(target_tmpl.keys()):
+            for g in sorted(set(curr_tmpl.keys()) | set(target_tmpl.keys())):
                 curr_val = curr_tmpl.get(g, 0)
                 target_val = target_tmpl.get(g, 0)
                 if curr_val != target_val:
@@ -504,8 +517,8 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
         if total_hangers < HANGERS:
             deficit = HANGERS - total_hangers
             # 주컬러 그룹에 우선 배분
-            main_color_grps = [g for g in curr_tmpl if grp_colors.get(g) == rot_main_color]
-            other_grps = [g for g in curr_tmpl if grp_colors.get(g) != rot_main_color and curr_tmpl[g] > 0]
+            main_color_grps = sorted([g for g in curr_tmpl if grp_colors.get(g) == rot_main_color])
+            other_grps = sorted([g for g in curr_tmpl if grp_colors.get(g) != rot_main_color and curr_tmpl[g] > 0])
             fill_order = main_color_grps + other_grps
 
             for g in fill_order:
@@ -525,7 +538,7 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
 
             # 옵션1: 이전 순서 유지
             stable_order = [g for g in prev_order if g in curr_tmpl and curr_tmpl[g] > 0]
-            for g in curr_tmpl:
+            for g in sorted(curr_tmpl.keys()):
                 if g not in stable_order and curr_tmpl[g] > 0:
                     stable_order.append(g)
 
@@ -784,7 +797,7 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
             if x['grp'] == grp:
                 color_prod[x['clr']] += x[prod_key][rotation]
         if color_prod and max(color_prod.values()) > 0:
-            return max(color_prod.keys(), key=lambda c: color_prod[c])
+            return max(color_prod.keys(), key=lambda c: (color_prod[c], c))
         return None
 
     # 각 회전의 순서를 실제 컬러 기준으로 재정렬 (지그예산 내에서)
@@ -808,13 +821,13 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
 
         # 컬러별로 그룹 분류
         color_groups = defaultdict(list)
-        for g, clr in actual_colors.items():
+        for g, clr in sorted(actual_colors.items()):
             if clr:
                 color_groups[clr].append(g)
 
         # 컬러 순서 결정 (행어 수 많은 컬러 우선)
         color_hangers = defaultdict(int)
-        for g, clr in actual_colors.items():
+        for g, clr in sorted(actual_colors.items()):
             if clr:
                 color_hangers[clr] += curr_tmpl.get(g, 0)
         sorted_colors = sorted(color_hangers.keys(), key=lambda c: -color_hangers[c])
@@ -867,7 +880,7 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
             if x['grp'] == grp:
                 color_prod[x['clr']] += x[prod_key][rotation]
         if color_prod and max(color_prod.values()) > 0:
-            return max(color_prod.keys(), key=lambda c: color_prod[c])
+            return max(color_prod.keys(), key=lambda c: (color_prod[c], c))
         return None
 
     def get_grp_colors_in_rotation(grp, rotation):
@@ -936,7 +949,7 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
                     hangers_per_rotation[r] += get_color_change_cost(colors_in_order[i-1])
 
             # 같은 지그그룹 회전간 컬러 변경 - 이전 컬러 도장 후 빈행어
-            for g, clr in curr_grp_colors.items():
+            for g, clr in sorted(curr_grp_colors.items()):
                 if g in prev_grp_colors and prev_grp_colors[g] != clr:
                     changes_per_rotation[r] += 1
                     hangers_per_rotation[r] += get_color_change_cost(prev_grp_colors[g])
@@ -959,7 +972,7 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
                 clr = get_grp_main_color(g, r)
                 if clr:
                     colors[clr] += templates[r][g]
-        rotation_color.append(max(colors.keys(), key=lambda c: colors[c]) if colors else None)
+        rotation_color.append(max(colors.keys(), key=lambda c: (colors[c], c)) if colors else None)
 
     last_order = jig_orders[9]
     last_color = rotation_color[9]
@@ -1006,7 +1019,7 @@ def schedule_d0_optimized(items):
     # Phase 2: 컬러 블록 계획
     MIN_BLOCK_DEMAND = 50  # 적정 수준
     color_rotations = {}
-    for clr, demand in color_demand.items():
+    for clr, demand in sorted(color_demand.items()):
         if demand['d0'] >= MIN_BLOCK_DEMAND:
             cap = sum(JIG_INVENTORY[g]['max_jigs'] for g in color_groups[clr] if g in JIG_INVENTORY)
             rotations = max(1, min(10, demand['d0'] // max(1, cap)))
@@ -1017,10 +1030,11 @@ def schedule_d0_optimized(items):
     # TSP 순서
     if sorted_colors:
         sequence = [sorted_colors[0]]
-        remaining = set(sorted_colors[1:])
+        remaining = list(sorted_colors[1:])  # list for determinism
         while remaining:
             last = sequence[-1]
-            next_c = min(remaining, key=lambda c: get_cc_cost(last, c))
+            # 컬러교환 비용 같으면 알파벳 순으로 tie-break (determinism)
+            next_c = min(remaining, key=lambda c: (get_cc_cost(last, c), c))
             sequence.append(next_c)
             remaining.remove(next_c)
     else:
@@ -1130,8 +1144,11 @@ def schedule_d0_optimized(items):
                     template[g] = current + add
                     remaining_h -= add
 
-        # 행어 큰 순 정렬
-        order = sorted(template.keys(), key=lambda g: -template.get(g, 0))
+        # 클러스터 기반 정렬: 같은 클러스터끼리 인접, 클러스터 내 행어 순
+        # 이렇게 하면 클러스터 내 컬러 공유 시 컬러교환 감소
+        order = sorted(template.keys(),
+                      key=lambda g: (CLUSTER_ORDER.get(GRP_TO_CLUSTER.get(g, 'Z'), 9),
+                                    -template.get(g, 0)))
         return template, order
 
     # 주간/야간 동일 템플릿 사용
@@ -1164,7 +1181,7 @@ def schedule_d0_optimized(items):
 
     # 컬러별 블록 회전 매핑
     color_to_rotations = defaultdict(list)
-    for r, clr in rot_main_color.items():
+    for r, clr in sorted(rot_main_color.items()):
         if clr:
             color_to_rotations[clr].append(r)
 
@@ -1197,7 +1214,7 @@ def schedule_d0_optimized(items):
         main_clr = rot_main_color.get(r)
 
         # 1차 패스: 필수 생산 (긴급 + 데드라인) + 주컬러 3일치
-        for g, hangers in tmpl.items():
+        for g, hangers in sorted(tmpl.items()):
             cap = hangers * JIGS_PER_HANGER * JIG_INVENTORY[g]['pcs']
             grp_items = [x for x in items if x['grp'] == g]
             if not grp_items:
@@ -1410,7 +1427,7 @@ def schedule_d0_optimized(items):
             dominant_colors = sorted(rot_colors_used.keys(),
                                    key=lambda c: (-len(rot_grp_colors[c]), -rot_colors_used[c]))
 
-            for g in tmpl.keys():
+            for g in sorted(tmpl.keys()):
                 remaining = grp_remaining_cap[r].get(g, 0)
                 if remaining <= 0:
                     continue
@@ -1423,7 +1440,7 @@ def schedule_d0_optimized(items):
                 grp_color_prod = defaultdict(int)
                 for x in grp_items:
                     grp_color_prod[x['clr']] += x['prod'][r]
-                current_main = max(grp_color_prod.keys(), key=lambda c: grp_color_prod[c]) if grp_color_prod else None
+                current_main = max(grp_color_prod.keys(), key=lambda c: (grp_color_prod[c], c)) if grp_color_prod else None
 
                 # 현재 메인 컬러가 있으면 그것만 추가 생산 (컬러교환 방지)
                 if current_main and grp_color_prod[current_main] > 0:
@@ -1567,13 +1584,13 @@ def schedule_d0_optimized(items):
             if x['grp'] == grp:
                 clr_prod[x['clr']] += x['prod'][rot]
         if clr_prod and max(clr_prod.values()) > 0:
-            return max(clr_prod.keys(), key=lambda c: clr_prod[c])
+            return max(clr_prod.keys(), key=lambda c: (clr_prod[c], c))
         return None
 
     # 컬러별 그룹 순서 재정렬 (같은 컬러끼리 연속)
     def optimize_order_by_color(rot, prev_color):
         color_grps = defaultdict(list)
-        for g in templates[rot]:
+        for g in sorted(templates[rot].keys()):
             if templates[rot][g] > 0:
                 clr = get_grp_color(g, rot)
                 if clr:
@@ -1593,7 +1610,7 @@ def schedule_d0_optimized(items):
 
         # 나머지 (행어 많은 순)
         rest = [(c, sum(templates[rot].get(g, 0) for g in gs))
-                for c, gs in color_grps.items() if c != prev_color]
+                for c, gs in sorted(color_grps.items()) if c != prev_color]
         rest.sort(key=lambda x: -x[1])
 
         for c, _ in rest:
@@ -1603,7 +1620,7 @@ def schedule_d0_optimized(items):
                     used.add(g)
 
         # 템플릿에 있지만 생산 없는 그룹도 추가
-        for g in templates[rot]:
+        for g in sorted(templates[rot].keys()):
             if g not in used:
                 new_order.append(g)
 
@@ -1645,19 +1662,19 @@ def schedule_d0_optimized(items):
         from itertools import permutations
 
         color_grps = defaultdict(list)
-        for g in templates[rot]:
+        for g in sorted(templates[rot].keys()):
             if templates[rot][g] > 0:
                 clr = get_grp_color(g, rot)
                 if clr:
                     color_grps[clr].append(g)
 
         if not color_grps:
-            return [list(templates[rot].keys())]
+            return [sorted(templates[rot].keys())]
 
         # 무생산 그룹
-        no_prod_grps = [g for g in templates[rot] if g not in sum(color_grps.values(), [])]
+        no_prod_grps = sorted([g for g in templates[rot] if g not in sum(color_grps.values(), [])])
 
-        colors = list(color_grps.keys())
+        colors = sorted(color_grps.keys())
         candidates = []
 
         # 컬러 수가 적으면 모든 순열 시도
@@ -1707,7 +1724,8 @@ def schedule_d0_optimized(items):
 
             while remaining:
                 last = sequence[-1]
-                next_c = min(remaining, key=lambda c: get_cc_cost(last, c))
+                # 컬러교환 비용 같으면 알파벳 순으로 tie-break (determinism)
+                next_c = min(remaining, key=lambda c: (get_cc_cost(last, c), c))
                 sequence.append(next_c)
                 remaining.remove(next_c)
 
@@ -1719,7 +1737,7 @@ def schedule_d0_optimized(items):
             if order not in candidates:
                 candidates.append(order)
 
-        return candidates if candidates else [list(templates[rot].keys())]
+        return candidates if candidates else [sorted(templates[rot].keys())]
 
     prev_clr = None
     prev_order = None
@@ -1799,7 +1817,7 @@ def schedule_d0_optimized(items):
             if x['grp'] == grp:
                 clr_prod[x['clr']] += x['prod'][rot]
         if clr_prod and max(clr_prod.values()) > 0:
-            return max(clr_prod.keys(), key=lambda c: clr_prod[c])
+            return max(clr_prod.keys(), key=lambda c: (clr_prod[c], c))
         return None
 
     cc_count_total = 0  # 컬러교환 횟수
@@ -1835,7 +1853,7 @@ def schedule_d0_optimized(items):
                 clr = get_grp_main_clr(g, r)
                 if clr:
                     clrs[clr] += templates[r][g]
-        rotation_color.append(max(clrs.keys(), key=lambda c: clrs[c]) if clrs else None)
+        rotation_color.append(max(clrs.keys(), key=lambda c: (clrs[c], c)) if clrs else None)
 
     # 컬러 디테일
     color_detail = []
@@ -2292,7 +2310,7 @@ def generate_html_report(items, schedule_result):
 </head>
 <body>
     <div class="container">
-        <h1>D0 생산계획 리포트 v9.1</h1>
+        <h1>D0 생산계획 리포트 v9.2</h1>
         <p>생성일시: {today.strftime("%Y-%m-%d %H:%M:%S")}</p>
 
         <div class="card">
