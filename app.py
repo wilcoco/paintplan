@@ -222,6 +222,8 @@ def load_data_from_db(demand_date):
             'prod2': [0] * 10
         })
 
+    # 재고 0인 아이템 제외 (generate_report.py와 동일)
+    items = [x for x in items if x['stk'] > 0]
     return items
 
 # ============================================
