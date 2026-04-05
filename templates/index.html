@@ -85,15 +85,67 @@
                         <label class="form-label">기준일자</label>
                         <input type="date" class="form-control" id="scheduleDate">
                     </div>
-                    <div class="col-md-6">
-                        <button class="btn btn-primary" onclick="runSchedule()">스케줄링 실행</button>
-                        <button class="btn btn-success ms-2" onclick="viewReport()">HTML 리포트</button>
+                </div>
+
+                <div class="row mb-3">
+                    <div class="col-12">
+                        <div class="card">
+                            <div class="card-header bg-primary text-white">
+                                <strong>알고리즘 선택</strong>
+                            </div>
+                            <div class="card-body">
+                                <div class="row g-3">
+                                    <div class="col-md-3">
+                                        <div class="card h-100">
+                                            <div class="card-body text-center">
+                                                <h6 class="card-title">1. 휴리스틱</h6>
+                                                <p class="card-text small text-muted">현재 방식 (v10.3)<br>컬러교환 ~31회</p>
+                                                <button class="btn btn-primary btn-sm" onclick="runScheduleAlgo('heuristic')">실행</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="card h-100">
+                                            <div class="card-body text-center">
+                                                <h6 class="card-title">2. MIP 최적화</h6>
+                                                <p class="card-text small text-muted">OR-Tools 수학적 최적해<br>시간 소요 多</p>
+                                                <button class="btn btn-warning btn-sm" onclick="runScheduleAlgo('mip')">실행</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="card h-100">
+                                            <div class="card-body text-center">
+                                                <h6 class="card-title">3. 컬러 중심</h6>
+                                                <p class="card-text small text-muted">컬러 우선 클러스터링<br>그룹 자동 결정</p>
+                                                <button class="btn btn-info btn-sm" onclick="runScheduleAlgo('color_first')">실행</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-3">
+                                        <div class="card h-100">
+                                            <div class="card-body text-center">
+                                                <h6 class="card-title">4. 2단계 분해</h6>
+                                                <p class="card-text small text-muted">할당 + TSP 순서<br>Look-Ahead</p>
+                                                <button class="btn btn-success btn-sm" onclick="runScheduleAlgo('two_phase')">실행</button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="row mb-3">
+                    <div class="col-12">
+                        <button class="btn btn-outline-secondary" onclick="viewReport()">HTML 리포트 보기</button>
                     </div>
                 </div>
 
                 <div id="scheduleLoading" style="display:none;">
                     <div class="spinner-border spinner-border-sm text-primary"></div>
-                    <span class="ms-2">스케줄링 중...</span>
+                    <span class="ms-2" id="scheduleLoadingText">스케줄링 중...</span>
                 </div>
 
                 <div id="scheduleResult" class="mt-3"></div>
@@ -234,18 +286,30 @@
             document.getElementById('demandTable').innerHTML = html;
         }
 
+        const algoNames = {
+            'heuristic': '휴리스틱 (v10.3)',
+            'mip': 'MIP 최적화',
+            'color_first': '컬러 중심',
+            'two_phase': '2단계 분해'
+        };
+
         async function runSchedule() {
+            runScheduleAlgo('heuristic');
+        }
+
+        async function runScheduleAlgo(algorithm) {
             const date = document.getElementById('scheduleDate').value;
             if (!date) { alert('기준일자를 선택하세요.'); return; }
 
             document.getElementById('scheduleLoading').style.display = 'block';
+            document.getElementById('scheduleLoadingText').textContent = `${algoNames[algorithm]} 스케줄링 중...`;
             document.getElementById('scheduleResult').innerHTML = '';
 
             try {
                 const r = await fetch('/api/schedule', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({date})
+                    body: JSON.stringify({date, algorithm})
                 });
                 const data = await r.json();
                 document.getElementById('scheduleLoading').style.display = 'none';
@@ -258,13 +322,17 @@
                 const d0 = data.d0;
                 const dayJig = d0.jig_changes.slice(0,5).reduce((a,b)=>a+b,0);
                 const nightJig = d0.jig_changes.slice(5).reduce((a,b)=>a+b,0);
+                const algoLabel = algoNames[algorithm] || algorithm;
 
                 document.getElementById('scheduleResult').innerHTML = `
                     <div class="alert alert-success">
-                        <h6>D0 스케줄링 완료</h6>
-                        <p class="mb-1">주간 지그교체: ${dayJig} / 150</p>
-                        <p class="mb-1">야간 지그교체: ${nightJig} / 150</p>
-                        <p class="mb-0">컬러교환: ${d0.color_changes}회</p>
+                        <h6>${algoLabel} 스케줄링 완료</h6>
+                        <p class="mb-1"><strong>알고리즘:</strong> ${algoLabel}</p>
+                        <p class="mb-1"><strong>컬러교환:</strong> ${d0.color_changes}회</p>
+                        <p class="mb-1"><strong>빈행어 손실:</strong> ${d0.empty_hangers || d0.color_changes}개</p>
+                        <p class="mb-1"><strong>주간 지그교체:</strong> ${dayJig} / 150</p>
+                        <p class="mb-1"><strong>야간 지그교체:</strong> ${nightJig} / 150</p>
+                        <p class="mb-0"><strong>D0 생산량:</strong> ${d0.total_production || '-'}개</p>
                     </div>`;
             } catch(e) {
                 document.getElementById('scheduleLoading').style.display = 'none';

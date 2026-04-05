@@ -503,36 +503,43 @@ def api_get_demand():
 
 @app.route('/api/schedule', methods=['POST'])
 def api_schedule():
-    """스케줄링 실행"""
+    """스케줄링 실행 (알고리즘 선택 가능)"""
     data = request.json
     demand_date = data.get('date')
+    algorithm = data.get('algorithm', 'heuristic')
 
     if not demand_date:
         return jsonify({'error': 'Date required'}), 400
 
     try:
-        from generate_report import schedule
+        from schedulers import run_scheduler
         items = load_data_from_db(demand_date)
-        result = schedule(items)
+        result = run_scheduler(items, algorithm)
         return jsonify(result)
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/report', methods=['GET'])
 def api_report():
     """HTML 리포트 생성"""
     demand_date = request.args.get('date')
+    algorithm = request.args.get('algorithm', 'heuristic')
 
     if not demand_date:
         return jsonify({'error': 'Date required'}), 400
 
     try:
-        from generate_report import generate_html_report, schedule
+        from generate_report import generate_html_report
+        from schedulers import run_scheduler
         items = load_data_from_db(demand_date)
-        result = schedule(items)
+        result = run_scheduler(items, algorithm)
         html = generate_html_report(items, result)
         return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 # ============================================
