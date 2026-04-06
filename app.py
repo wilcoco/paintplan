@@ -501,9 +501,13 @@ def api_get_demand():
 
     return jsonify(result)
 
+# 스케줄 결과 캐시 (리포트에서 재사용)
+_schedule_cache = {}
+
 @app.route('/api/schedule', methods=['POST'])
 def api_schedule():
     """스케줄링 실행 (알고리즘 선택 가능)"""
+    global _schedule_cache
     data = request.json
     demand_date = data.get('date')
     algorithm = data.get('algorithm', 'heuristic')
@@ -515,6 +519,11 @@ def api_schedule():
         from schedulers import run_scheduler
         items = load_data_from_db(demand_date)
         result = run_scheduler(items, algorithm)
+
+        # 결과 캐시 (리포트용)
+        cache_key = f"{demand_date}_{algorithm}"
+        _schedule_cache[cache_key] = {'items': items, 'result': result}
+
         return jsonify(result)
     except Exception as e:
         import traceback
@@ -523,7 +532,7 @@ def api_schedule():
 
 @app.route('/api/report', methods=['GET'])
 def api_report():
-    """HTML 리포트 생성"""
+    """HTML 리포트 생성 (캐시된 결과 사용)"""
     demand_date = request.args.get('date')
     algorithm = request.args.get('algorithm', 'heuristic')
 
@@ -532,9 +541,20 @@ def api_report():
 
     try:
         from generate_report import generate_html_report
-        from schedulers import run_scheduler
-        items = load_data_from_db(demand_date)
-        result = run_scheduler(items, algorithm)
+
+        # 캐시에서 결과 조회
+        cache_key = f"{demand_date}_{algorithm}"
+        if cache_key in _schedule_cache:
+            cached = _schedule_cache[cache_key]
+            items = cached['items']
+            result = cached['result']
+        else:
+            # 캐시 없으면 스케줄링 실행
+            from schedulers import run_scheduler
+            items = load_data_from_db(demand_date)
+            result = run_scheduler(items, algorithm)
+            _schedule_cache[cache_key] = {'items': items, 'result': result}
+
         html = generate_html_report(items, result)
         return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
     except Exception as e:
