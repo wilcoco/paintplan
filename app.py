@@ -574,6 +574,23 @@ def api_db_status():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/test/ortools', methods=['GET'])
+def api_test_ortools():
+    """OR-Tools 설치 테스트"""
+    try:
+        from ortools.linear_solver import pywraplp
+        solver = pywraplp.Solver.CreateSolver('SCIP')
+        if solver:
+            return jsonify({'status': 'OK', 'solver': 'SCIP'})
+        solver = pywraplp.Solver.CreateSolver('CBC')
+        if solver:
+            return jsonify({'status': 'OK', 'solver': 'CBC'})
+        return jsonify({'status': 'ERROR', 'message': 'No solver available'})
+    except ImportError as e:
+        return jsonify({'status': 'ERROR', 'message': f'Import failed: {e}'})
+    except Exception as e:
+        return jsonify({'status': 'ERROR', 'message': str(e)})
+
 # ============================================
 # Main
 # ============================================
