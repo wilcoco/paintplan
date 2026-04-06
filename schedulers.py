@@ -265,21 +265,36 @@ def schedule_mip(items):
     # 제약조건
     # ============================================
 
-    # 1. 재고 >= 0 (각 회전 후)
+    # 1. 재고 >= 0 (각 회전 후) - 2회전 리드타임 적용
+    # r회전 수요 충족: r-2회전까지의 생산만 사용 가능
+    LEAD_TIME = 2
     for i, item in enumerate(items):
         stk = item.get('stk', 0)
         for r in range(n_rotations):
-            cum_prod = sum(x[i, rr] for rr in range(r + 1))
+            # r회전까지의 수요
             cum_demand = sum(item['d0'][rr] for rr in range(r + 1))
+            # r-2회전까지의 생산만 사용 가능 (리드타임)
+            available_rot = r - LEAD_TIME
+            cum_prod = sum(x[i, rr] for rr in range(available_rot + 1)) if available_rot >= 0 else 0
             solver.Add(stk + cum_prod - cum_demand >= 0)
 
-    # 2. D+1 1-2회전 재고 >= 0
+    # 2. D+1 1-2회전 재고 >= 0 (리드타임 적용)
+    # D+1 1회전 = 회전11 → 9회전까지 생산 필요 (11-2=9)
+    # D+1 2회전 = 회전12 → 10회전까지 생산 필요 (12-2=10)
     for i, item in enumerate(items):
         stk = item.get('stk', 0)
-        d0_prod = sum(x[i, r] for r in range(n_rotations))
         d0_demand = sum(item['d0'])
-        d1_demand_12 = sum(item.get('d1', [0]*10)[:2])
-        solver.Add(stk + d0_prod - d0_demand - d1_demand_12 >= 0)
+        d1 = item.get('d1', [0]*10)
+
+        # D+1 1회전 수요 충족: D0 9회전까지 생산 (0~8 인덱스)
+        d1_rot1 = d1[0] if len(d1) > 0 else 0
+        prod_by_rot9 = sum(x[i, r] for r in range(9))
+        solver.Add(stk + prod_by_rot9 - d0_demand - d1_rot1 >= 0)
+
+        # D+1 2회전 수요 충족: D0 10회전까지 생산 (전체)
+        d1_rot12 = d1[0] + (d1[1] if len(d1) > 1 else 0)
+        prod_by_rot10 = sum(x[i, r] for r in range(n_rotations))
+        solver.Add(stk + prod_by_rot10 - d0_demand - d1_rot12 >= 0)
 
     # 3. 그룹별 생산량 <= 행어 × 지그 × pcs
     for g in groups:
