@@ -51,7 +51,7 @@ def get_config():
         db.session.commit()
     return jsonify({
         "hanger_count": cfg.hanger_count,
-        "jigs_per_hanger": cfg.jigs_per_hanger,
+        "jigs_per_hanger": 2,  # 기본값 (행어당 지그 수는 Product별로 관리)
         "rotations_per_day": cfg.rotations_per_day,
         "max_jig_changes": cfg.max_jig_changes,
         "safety_stock_days": cfg.safety_stock_days,
@@ -66,10 +66,11 @@ def save_config():
     if not cfg:
         cfg = PlanConfig()
         db.session.add(cfg)
-    for k in ["hanger_count", "jigs_per_hanger", "rotations_per_day",
+    for k in ["hanger_count", "rotations_per_day",
               "max_jig_changes", "safety_stock_days", "planning_days"]:
         if k in data:
             setattr(cfg, k, int(data[k]))
+    # jigs_per_hanger는 Product별로 관리되므로 여기서 무시
     db.session.commit()
     return jsonify({"ok": True})
 
