@@ -191,18 +191,23 @@ def schedule_mip(items):
     목적함수: 컬러교환 최소화
     제약조건:
     - 재고 >= 0 (모든 회전)
-    - D+1 1-2회전 재고 >= 0
+    - D+1 주간(1-5회전) 재고 >= 0
     - 용량 제약 (그룹별/회전별)
     - 지그교체 예산 (주간/야간 각 150행어)
     """
     try:
         from ortools.linear_solver import pywraplp
-    except ImportError:
-        return {'error': 'OR-Tools가 설치되지 않았습니다. pip install ortools'}
+    except ImportError as e:
+        return {'error': f'OR-Tools 임포트 실패: {e}'}
+    except Exception as e:
+        return {'error': f'OR-Tools 로드 오류: {e}'}
 
     solver = pywraplp.Solver.CreateSolver('SCIP')
     if not solver:
-        return {'error': 'SCIP 솔버를 생성할 수 없습니다.'}
+        # SCIP 실패 시 CBC 시도
+        solver = pywraplp.Solver.CreateSolver('CBC')
+    if not solver:
+        return {'error': 'MIP 솔버(SCIP/CBC)를 생성할 수 없습니다.'}
 
     n_items = len(items)
     n_rotations = ROTATIONS
@@ -404,7 +409,7 @@ def schedule_mip(items):
 
     solver.Minimize(CC_WEIGHT * total_color_starts + EMPTY_WEIGHT * empty_hanger_cost - total_production)
 
-    solver.SetTimeLimit(300000)  # 5분
+    solver.SetTimeLimit(60000)  # 60초 (Railway 타임아웃 방지)
 
     # 풀이
     status = solver.Solve()
@@ -760,7 +765,11 @@ def run_scheduler(items, algorithm='heuristic'):
         return normalize_result(result)
 
     elif algorithm == 'mip':
-        return schedule_mip(items)
+        try:
+            return schedule_mip(items)
+        except Exception as e:
+            import traceback
+            return {'error': f'MIP 실행 오류: {e}', 'traceback': traceback.format_exc()[:500]}
 
     elif algorithm == 'color_first':
         return schedule_color_first(items)
