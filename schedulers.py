@@ -413,13 +413,18 @@ def schedule_mip(items):
     # 컬러교환 및 빈행어 계산 (특수컬러 15개 반영)
     cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
 
+    # 순생산량 = 총생산량 - 빈행어손실 (빈행어 1개 = 2지그 = 2개 손실)
+    gross_production = sum(sum(item['prod']) for item in items)
+    net_production = gross_production - (empty_hangers * JIGS_PER_HANGER)
+
     return {
         'algorithm': 'MIP',
         'd0': {
             'color_changes': cc_count,
             'empty_hangers': empty_hangers,
             'jig_changes': jig_changes,
-            'total_production': sum(sum(item['prod']) for item in items)
+            'gross_production': gross_production,
+            'total_production': net_production  # 빈행어 손실 차감된 순생산량
         }
     }
 
@@ -533,13 +538,18 @@ def schedule_color_first(items):
     jig_changes = calculate_jig_changes(items)
     cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
 
+    # 순생산량 = 총생산량 - 빈행어손실
+    gross_production = sum(sum(x['prod']) for x in items)
+    net_production = gross_production - (empty_hangers * JIGS_PER_HANGER)
+
     return {
         'algorithm': 'color_first',
         'd0': {
             'color_changes': cc_count,
             'empty_hangers': empty_hangers,
             'jig_changes': jig_changes,
-            'total_production': sum(sum(x['prod']) for x in items)
+            'gross_production': gross_production,
+            'total_production': net_production
         }
     }
 
@@ -654,13 +664,18 @@ def schedule_two_phase(items):
     jig_changes = calculate_jig_changes(items)
     cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
 
+    # 순생산량 = 총생산량 - 빈행어손실
+    gross_production = sum(sum(x['prod']) for x in items)
+    net_production = gross_production - (empty_hangers * JIGS_PER_HANGER)
+
     return {
         'algorithm': 'two_phase',
         'd0': {
             'color_changes': cc_count,
             'empty_hangers': empty_hangers,
             'jig_changes': jig_changes,
-            'total_production': sum(sum(x['prod']) for x in items)
+            'gross_production': gross_production,
+            'total_production': net_production
         }
     }
 
@@ -723,9 +738,14 @@ def run_scheduler(items, algorithm='heuristic'):
         # 기존 휴리스틱 사용
         from generate_report import schedule
         result = schedule(items)
-        # 총 생산량 계산
+        # 순생산량 계산 (빈행어 손실 차감)
         if 'd0' in result:
-            result['d0']['total_production'] = sum(sum(x.get('prod', [0]*10)) for x in items)
+            gross_production = sum(sum(x.get('prod', [0]*10)) for x in items)
+            cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
+            net_production = gross_production - (empty_hangers * JIGS_PER_HANGER)
+            result['d0']['gross_production'] = gross_production
+            result['d0']['total_production'] = net_production
+            result['d0']['empty_hangers'] = empty_hangers
         return normalize_result(result)
 
     elif algorithm == 'mip':

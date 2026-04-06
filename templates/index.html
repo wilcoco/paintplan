@@ -324,15 +324,21 @@
                 const nightJig = d0.jig_changes.slice(5).reduce((a,b)=>a+b,0);
                 const algoLabel = algoNames[algorithm] || algorithm;
 
+                const gross = d0.gross_production || (d0.total_production + (d0.empty_hangers || 0) * 2);
+                const net = d0.total_production || '-';
+                const emptyH = d0.empty_hangers || 0;
+                const loss = emptyH * 2;
+
                 document.getElementById('scheduleResult').innerHTML = `
                     <div class="alert alert-success">
                         <h6>${algoLabel} 스케줄링 완료</h6>
                         <p class="mb-1"><strong>알고리즘:</strong> ${algoLabel}</p>
                         <p class="mb-1"><strong>컬러교환:</strong> ${d0.color_changes}회</p>
-                        <p class="mb-1"><strong>빈행어 손실:</strong> ${d0.empty_hangers || d0.color_changes}개</p>
+                        <p class="mb-1"><strong>빈행어 손실:</strong> ${emptyH}개 (= ${loss}개 생산손실)</p>
                         <p class="mb-1"><strong>주간 지그교체:</strong> ${dayJig} / 150</p>
                         <p class="mb-1"><strong>야간 지그교체:</strong> ${nightJig} / 150</p>
-                        <p class="mb-0"><strong>D0 생산량:</strong> ${d0.total_production || '-'}개</p>
+                        <p class="mb-1"><strong>D0 총생산:</strong> ${gross}개</p>
+                        <p class="mb-0"><strong>D0 순생산:</strong> ${net}개 <small class="text-muted">(총생산 - 빈행어손실)</small></p>
                     </div>`;
             } catch(e) {
                 document.getElementById('scheduleLoading').style.display = 'none';
