@@ -38,6 +38,157 @@ def get_color_change_cost(from_color):
     return 1
 
 
+# ============================================
+# 지그 위치 기반 교체 계산 함수
+# ============================================
+def order_to_positions(tmpl, order):
+    """템플릿과 순서를 140개 위치 배열로 변환"""
+    positions = []
+    for g in order:
+        if g in tmpl and tmpl[g] > 0:
+            positions.extend([g] * tmpl[g])
+    while len(positions) < HANGERS:
+        positions.append(None)
+    return positions[:HANGERS]
+
+
+def calc_position_changes(pos1, pos2):
+    """두 위치 배열 간 실제 교체 수 계산"""
+    if not pos1 or not pos2:
+        return 0
+    return sum(1 for i in range(HANGERS) if pos1[i] != pos2[i])
+
+
+def get_grp_main_color(items, grp, rotation):
+    """해당 회전에서 그룹의 주요 컬러 반환"""
+    color_prod = defaultdict(int)
+    for x in items:
+        if x.get('grp') == grp:
+            prod = x.get('prod', [0]*10)
+            if rotation < len(prod):
+                color_prod[x['clr']] += prod[rotation]
+    if color_prod:
+        return max(color_prod.keys(), key=lambda c: (color_prod[c], c))
+    return None
+
+
+def optimize_jig_order(templates, items, jig_budget_day=150, jig_budget_night=150):
+    """MIP 템플릿 결과에 대해 최적 지그 순서 결정
+
+    전략:
+    1. 컬러 연속성 최대화 (같은 컬러 그룹 인접 배치)
+    2. 지그 교체 예산 내에서 순서 결정
+    3. 이전 회전 순서 최대한 유지
+    """
+    n_rotations = len(templates)
+    jig_orders = []
+    jig_changes = [0] * n_rotations
+
+    day_budget_left = jig_budget_day
+    night_budget_left = jig_budget_night
+
+    prev_positions = None
+    prev_order = None
+
+    for r in range(n_rotations):
+        tmpl = templates[r]
+        is_day = r < 5
+        budget_left = day_budget_left if is_day else night_budget_left
+
+        # 사용중인 그룹들
+        active_groups = [g for g in tmpl if tmpl[g] > 0]
+        if not active_groups:
+            jig_orders.append([])
+            continue
+
+        # 그룹별 주요 컬러 파악
+        grp_colors = {}
+        for g in active_groups:
+            grp_colors[g] = get_grp_main_color(items, g, r)
+
+        # 후보 순서 생성
+        candidates = []
+
+        # 1. 이전 순서 유지 (새 그룹은 뒤에)
+        if prev_order:
+            stable_order = [g for g in prev_order if g in active_groups]
+            for g in active_groups:
+                if g not in stable_order:
+                    stable_order.append(g)
+            candidates.append(stable_order)
+
+        # 2. 컬러별 그룹 묶음
+        color_groups = defaultdict(list)
+        for g in active_groups:
+            clr = grp_colors.get(g)
+            if clr:
+                color_groups[clr].append(g)
+            else:
+                color_groups[None].append(g)
+
+        # 컬러별 생산량 순 정렬
+        color_order = []
+        sorted_colors = sorted(color_groups.keys(),
+                              key=lambda c: -sum(tmpl.get(g, 0) for g in color_groups[c]) if c else 0)
+        for clr in sorted_colors:
+            grps = sorted(color_groups[clr], key=lambda g: -tmpl.get(g, 0))
+            color_order.extend(grps)
+        candidates.append(color_order)
+
+        # 3. 행어 수 내림차순
+        size_order = sorted(active_groups, key=lambda g: -tmpl.get(g, 0))
+        candidates.append(size_order)
+
+        # 최적 순서 선택 (지그교체 최소)
+        best_order = candidates[0]
+        best_cost = float('inf')
+
+        for cand in candidates:
+            cand_pos = order_to_positions(tmpl, cand)
+            cost = calc_position_changes(prev_positions, cand_pos)
+            if cost < best_cost:
+                best_cost = cost
+                best_order = cand
+
+        # 예산 체크
+        curr_positions = order_to_positions(tmpl, best_order)
+        changes = calc_position_changes(prev_positions, curr_positions)
+
+        if changes <= budget_left:
+            jig_changes[r] = changes
+            if is_day:
+                day_budget_left -= changes
+            else:
+                night_budget_left -= changes
+        else:
+            # 예산 초과: 이전 순서 유지 시도
+            if prev_order:
+                fallback_order = [g for g in prev_order if g in active_groups]
+                for g in active_groups:
+                    if g not in fallback_order:
+                        fallback_order.append(g)
+                fallback_pos = order_to_positions(tmpl, fallback_order)
+                fallback_cost = calc_position_changes(prev_positions, fallback_pos)
+                if fallback_cost <= budget_left:
+                    best_order = fallback_order
+                    curr_positions = fallback_pos
+                    jig_changes[r] = fallback_cost
+                    if is_day:
+                        day_budget_left -= fallback_cost
+                    else:
+                        night_budget_left -= fallback_cost
+                else:
+                    jig_changes[r] = changes  # 예산 초과 기록
+            else:
+                jig_changes[r] = changes
+
+        jig_orders.append(best_order)
+        prev_positions = curr_positions
+        prev_order = best_order
+
+    return jig_orders, jig_changes
+
+
 def calculate_jig_changes(items):
     """회전별 지그 교체 수 계산
 
@@ -249,12 +400,25 @@ def schedule_mip(items):
         for r in range(n_rotations):
             h[g, r] = solver.IntVar(0, max_hangers, f'h_{g}_{r}')
 
-    # d[g,r] = |h[g,r] - h[g,r-1]| (지그 변화량)
-    d = {}
-    for g in groups:
+    # ============================================
+    # 위치 기반 지그교체 모델링
+    # 그룹 순서 고정: A, B, B2, C, D, E, F, G, H, I
+    # cumsum[k,r] = 처음 k+1개 그룹의 누적 행어 수
+    # 위치 변화 = 경계 이동량의 합 = Σ|cumsum[k,r] - cumsum[k,r-1]|
+    # ============================================
+    ordered_groups = ['A', 'B', 'B2', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
+    n_groups = len(ordered_groups)
+
+    # cumsum[k,r] = sum of h[groups[i],r] for i = 0 to k
+    # cumsum[-1,r] = 0 (가상의 시작점)
+    # cumsum[n_groups-1,r] = 140 (총 행어 수)
+
+    # delta[k,r] = |cumsum[k,r] - cumsum[k,r-1]| for k = 0 to n_groups-2
+    # (마지막 경계는 항상 140이므로 제외)
+    delta = {}
+    for k in range(n_groups - 1):  # 0 to 8 (9개 내부 경계)
         for r in range(1, n_rotations):
-            max_hangers = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
-            d[g, r] = solver.IntVar(0, max_hangers, f'd_{g}_{r}')
+            delta[k, r] = solver.IntVar(0, HANGERS, f'delta_{k}_{r}')
 
     # y[c,r] = 1 if color c is used in rotation r
     y = {}
@@ -317,15 +481,25 @@ def schedule_mip(items):
     for r in range(n_rotations):
         solver.Add(sum(x[i, r] for i in range(n_items)) <= MAX_PER_ROTATION * 2)
 
-    # 6. 지그 변화량 절대값
-    for g in groups:
+    # 6. 위치 기반 지그 변화량 (경계 이동)
+    # cumsum[k,r] = sum(h[ordered_groups[i],r] for i in range(k+1))
+    # delta[k,r] >= |cumsum[k,r] - cumsum[k,r-1]|
+    for k in range(n_groups - 1):
         for r in range(1, n_rotations):
-            solver.Add(d[g, r] >= h[g, r] - h[g, r - 1])
-            solver.Add(d[g, r] >= h[g, r - 1] - h[g, r])
+            # cumsum[k,r] - cumsum[k,r-1]의 절대값
+            cumsum_curr = sum(h[ordered_groups[i], r] for i in range(k + 1))
+            cumsum_prev = sum(h[ordered_groups[i], r - 1] for i in range(k + 1))
+            solver.Add(delta[k, r] >= cumsum_curr - cumsum_prev)
+            solver.Add(delta[k, r] >= cumsum_prev - cumsum_curr)
 
-    # 7. 지그교체 예산
-    solver.Add(sum(d[g, r] for g in groups for r in range(1, 5)) <= JIG_BUDGET_DAY)
-    solver.Add(sum(d[g, r] for g in groups for r in range(5, n_rotations)) <= JIG_BUDGET_NIGHT)
+    # 7. 지그교체 예산 (위치 기반)
+    # 주간 (회전 1-4, 즉 r=1,2,3,4): 회전0→1, 1→2, 2→3, 3→4
+    day_position_changes = sum(delta[k, r] for k in range(n_groups - 1) for r in range(1, 5))
+    solver.Add(day_position_changes <= JIG_BUDGET_DAY)
+
+    # 야간 (회전 5-9, 즉 r=5,6,7,8,9): 회전4→5, 5→6, 6→7, 7→8, 8→9
+    night_position_changes = sum(delta[k, r] for k in range(n_groups - 1) for r in range(5, n_rotations))
+    solver.Add(night_position_changes <= JIG_BUDGET_NIGHT)
 
     # 8. 컬러 사용 여부: y[c,r] = 1 iff sum(x[i,r] for i in color c) > 0
     for c in colors:
@@ -424,10 +598,10 @@ def schedule_mip(items):
     for i, item in enumerate(items):
         item['prod'] = [int(x[i, r].solution_value()) for r in range(n_rotations)]
 
-    # 지그교체 계산 (실제 결과에서)
+    # 지그교체 계산 (위치 기반 - 경계 이동량 합)
     jig_changes = [0] * n_rotations
     for r in range(1, n_rotations):
-        jig_changes[r] = sum(int(d[g, r].solution_value()) for g in groups)
+        jig_changes[r] = sum(int(delta[k, r].solution_value()) for k in range(n_groups - 1))
 
     # 컬러교환 및 빈행어 계산 (특수컬러 15개 반영)
     cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
@@ -439,10 +613,14 @@ def schedule_mip(items):
     # 회전별 템플릿 및 컬러 추출 (리포트용)
     templates = []
     rotation_colors = []
+    jig_orders = []
     for r in range(n_rotations):
         # 템플릿: 그룹별 행어 수
         template = {g: int(h[g, r].solution_value()) for g in groups}
         templates.append(template)
+        # 지그 순서: 고정 순서에서 사용중인 그룹만
+        active_order = [g for g in ordered_groups if template.get(g, 0) > 0]
+        jig_orders.append(active_order)
         # 회전에 사용된 컬러들
         rot_colors = []
         for i, item in enumerate(items):
@@ -463,7 +641,7 @@ def schedule_mip(items):
             'total_production': net_production,
             'templates': templates,  # 리포트 호환
             'colors': rotation_colors,  # 리포트 호환
-            'jig_orders': [None] * n_rotations  # 리포트 호환
+            'jig_orders': jig_orders  # 고정 순서 기반
         },
         'd1': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10},
         'd2': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10}
