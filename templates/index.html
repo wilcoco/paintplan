@@ -231,6 +231,11 @@
 
             try {
                 const r = await fetch('/api/demand/upload', { method: 'POST', body: formData });
+                const contentType = r.headers.get('content-type');
+                if (!r.ok || !contentType || !contentType.includes('application/json')) {
+                    const text = await r.text();
+                    throw new Error(`서버 오류 (${r.status}): ${text.substring(0, 200)}`);
+                }
                 const data = await r.json();
                 if (data.success) {
                     resultDiv.className = 'alert alert-success';
@@ -241,7 +246,7 @@
                 }
             } catch(e) {
                 resultDiv.className = 'alert alert-danger';
-                resultDiv.textContent = '업로드 실패: ' + e;
+                resultDiv.textContent = '업로드 실패: ' + e.message;
             }
         }
 
