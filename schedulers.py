@@ -341,7 +341,9 @@ def schedule_mip(items):
             solver.Add(y[c, r] - y[c, r + 1] + y[c, r + 2] <= 1)
 
     # ============================================
-    # 추가 제약 2: 컬러 종료 페널티
+    # 추가 제약 2: 컬러 종료 추적 (특수컬러 구분)
+    # 특수컬러(MGG, T4M, UMA, ZRM, ISM, MRM) 종료: 15행어 비용
+    # 일반컬러 종료: 1행어 비용
     # ============================================
     color_end = {}
     for c in colors:
@@ -350,33 +352,46 @@ def schedule_mip(items):
             solver.Add(color_end[c, r] >= y[c, r] - y[c, r + 1])
             solver.Add(color_end[c, r] <= y[c, r])
 
+    # 특수컬러 종료 합계 (15배 비용)
+    special_color_ends = sum(
+        color_end[c, r]
+        for c in colors if c.upper() in SPECIAL_COLORS
+        for r in range(n_rotations - 1)
+    )
+    # 일반컬러 종료 합계
+    normal_color_ends = sum(
+        color_end[c, r]
+        for c in colors if c.upper() not in SPECIAL_COLORS
+        for r in range(n_rotations - 1)
+    )
+
     # ============================================
     # 추가 제약 3: 회전당 컬러 수 제한
-    # 휴리스틱처럼 회전당 1-4개 컬러로 제한
     # ============================================
     MAX_COLORS_PER_ROT = 4
     for r in range(n_rotations):
         solver.Add(sum(y[c, r] for c in colors) <= MAX_COLORS_PER_ROT)
 
     # ============================================
-    # 추가 제약 4: 총 컬러-회전 쌍 제한 (컬러 집중도)
-    # 휴리스틱: 28개 (평균 2.8 * 10)
+    # 추가 제약 4: 총 컬러-회전 쌍 제한
     # ============================================
     total_color_rotation_pairs = sum(y[c, r] for c in colors for r in range(n_rotations))
-    solver.Add(total_color_rotation_pairs <= 32)  # 약간 여유
+    solver.Add(total_color_rotation_pairs <= 32)
 
     # ============================================
-    # 목적함수: 컬러교환 최소화
+    # 목적함수: 빈행어 최소화 (특수컬러 15배 반영)
     # ============================================
     total_color_starts = sum(cc[c, r] for c in colors for r in range(n_rotations))
-    total_color_ends = sum(color_end[c, r] for c in colors for r in range(n_rotations - 1))
     total_production = sum(x[i, r] for i in range(n_items) for r in range(n_rotations))
 
-    # CC 최소화 우선, 생산량은 부차적
-    CC_WEIGHT = 1000
-    END_WEIGHT = 500
+    # 빈행어 비용: 특수컬러 종료 * 15 + 일반컬러 종료 * 1
+    empty_hanger_cost = 15 * special_color_ends + 1 * normal_color_ends
 
-    solver.Minimize(CC_WEIGHT * total_color_starts + END_WEIGHT * total_color_ends - total_production)
+    # CC 최소화 + 빈행어 비용 반영
+    CC_WEIGHT = 1000
+    EMPTY_WEIGHT = 100  # 빈행어 1개 = 100 가치
+
+    solver.Minimize(CC_WEIGHT * total_color_starts + EMPTY_WEIGHT * empty_hanger_cost - total_production)
 
     solver.SetTimeLimit(300000)  # 5분
 
@@ -395,13 +410,14 @@ def schedule_mip(items):
     for r in range(1, n_rotations):
         jig_changes[r] = sum(int(d[g, r].solution_value()) for g in groups)
 
-    cc_count = calculate_color_changes(items)
+    # 컬러교환 및 빈행어 계산 (특수컬러 15개 반영)
+    cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
 
     return {
         'algorithm': 'MIP',
         'd0': {
             'color_changes': cc_count,
-            'empty_hangers': cc_count,
+            'empty_hangers': empty_hangers,
             'jig_changes': jig_changes,
             'total_production': sum(sum(item['prod']) for item in items)
         }
@@ -515,13 +531,13 @@ def schedule_color_first(items):
     fill_capacity_for_safety_stock(items, rot_grp_prod)
 
     jig_changes = calculate_jig_changes(items)
-    cc_count = calculate_color_changes(items)
+    cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
 
     return {
         'algorithm': 'color_first',
         'd0': {
             'color_changes': cc_count,
-            'empty_hangers': cc_count,
+            'empty_hangers': empty_hangers,
             'jig_changes': jig_changes,
             'total_production': sum(sum(x['prod']) for x in items)
         }
@@ -636,13 +652,13 @@ def schedule_two_phase(items):
     fill_capacity_for_safety_stock(items, rot_grp_prod)
 
     jig_changes = calculate_jig_changes(items)
-    cc_count = calculate_color_changes(items)
+    cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
 
     return {
         'algorithm': 'two_phase',
         'd0': {
             'color_changes': cc_count,
-            'empty_hangers': cc_count,
+            'empty_hangers': empty_hangers,
             'jig_changes': jig_changes,
             'total_production': sum(sum(x['prod']) for x in items)
         }
@@ -652,9 +668,14 @@ def schedule_two_phase(items):
 # ============================================
 # 유틸리티: 컬러교환 계산
 # ============================================
-def calculate_color_changes(items):
-    """회전별 컬러교환 횟수 계산"""
+def calculate_color_changes(items, return_details=False):
+    """회전별 컬러교환 횟수 및 빈행어 계산
+
+    특수컬러(MGG, T4M, UMA, ZRM, ISM, MRM) 후 교환: 15행어
+    일반컬러 후 교환: 1행어
+    """
     cc_count = 0
+    empty_hangers = 0
     prev_color = None
 
     for r in range(ROTATIONS):
@@ -669,8 +690,12 @@ def calculate_color_changes(items):
         for clr in colors_in_rot:
             if prev_color and prev_color != clr:
                 cc_count += 1
+                # 이전 컬러 기준으로 빈행어 결정
+                empty_hangers += get_color_change_cost(prev_color)
             prev_color = clr
 
+    if return_details:
+        return cc_count, empty_hangers
     return cc_count
 
 
