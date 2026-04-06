@@ -580,15 +580,39 @@ def schedule_color_first(items):
     gross_production = sum(sum(x['prod']) for x in items)
     net_production = gross_production - (empty_hangers * JIGS_PER_HANGER)
 
+    # 회전별 템플릿 및 컬러 추출 (리포트용)
+    templates = []
+    rotation_colors = []
+    for r in range(ROTATIONS):
+        template = {g: 0 for g in JIG_INVENTORY}
+        rot_colors = []
+        for x in items:
+            if x['prod'][r] > 0:
+                g = x.get('grp')
+                if g and g in template:
+                    pcs = JIG_INVENTORY[g]['pcs']
+                    template[g] += (x['prod'][r] + pcs - 1) // pcs // JIGS_PER_HANGER
+                if x.get('clr') and x['clr'] not in rot_colors:
+                    rot_colors.append(x['clr'])
+        templates.append(template)
+        rotation_colors.append(rot_colors)
+
     return {
         'algorithm': 'color_first',
         'd0': {
             'color_changes': cc_count,
+            'cc_count': cc_count,
             'empty_hangers': empty_hangers,
+            'cc_hangers': empty_hangers,
             'jig_changes': jig_changes,
             'gross_production': gross_production,
-            'total_production': net_production
-        }
+            'total_production': net_production,
+            'templates': templates,
+            'colors': rotation_colors,
+            'jig_orders': [None] * ROTATIONS
+        },
+        'd1': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10},
+        'd2': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10}
     }
 
 
@@ -706,15 +730,39 @@ def schedule_two_phase(items):
     gross_production = sum(sum(x['prod']) for x in items)
     net_production = gross_production - (empty_hangers * JIGS_PER_HANGER)
 
+    # 회전별 템플릿 및 컬러 추출 (리포트용)
+    templates = []
+    rotation_colors = []
+    for r in range(ROTATIONS):
+        template = {g: 0 for g in JIG_INVENTORY}
+        rot_colors = []
+        for x in items:
+            if x['prod'][r] > 0:
+                g = x.get('grp')
+                if g and g in template:
+                    pcs = JIG_INVENTORY[g]['pcs']
+                    template[g] += (x['prod'][r] + pcs - 1) // pcs // JIGS_PER_HANGER
+                if x.get('clr') and x['clr'] not in rot_colors:
+                    rot_colors.append(x['clr'])
+        templates.append(template)
+        rotation_colors.append(rot_colors)
+
     return {
         'algorithm': 'two_phase',
         'd0': {
             'color_changes': cc_count,
+            'cc_count': cc_count,
             'empty_hangers': empty_hangers,
+            'cc_hangers': empty_hangers,
             'jig_changes': jig_changes,
             'gross_production': gross_production,
-            'total_production': net_production
-        }
+            'total_production': net_production,
+            'templates': templates,
+            'colors': rotation_colors,
+            'jig_orders': [None] * ROTATIONS
+        },
+        'd1': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10},
+        'd2': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10}
     }
 
 
