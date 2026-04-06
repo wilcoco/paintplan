@@ -543,6 +543,38 @@ def api_report():
         return jsonify({'error': str(e)}), 500
 
 # ============================================
+# DB 관리
+# ============================================
+
+@app.route('/api/db/reset', methods=['POST'])
+def api_reset_db():
+    """DB 초기화 (모든 데이터 삭제)"""
+    try:
+        DailyDemand.query.delete()
+        Inventory.query.delete()
+        Item.query.delete()
+        db.session.commit()
+        return jsonify({'success': True, 'message': 'DB 초기화 완료'})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/db/status', methods=['GET'])
+def api_db_status():
+    """DB 상태 확인"""
+    try:
+        items = Item.query.count()
+        demands = DailyDemand.query.count()
+        inventories = Inventory.query.count()
+        return jsonify({
+            'items': items,
+            'demands': demands,
+            'inventories': inventories
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# ============================================
 # Main
 # ============================================
 
