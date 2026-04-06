@@ -3192,17 +3192,35 @@ def format_rotation_items_html(items, rotation, prod_key, templates, jig_orders)
     return "".join(result_parts)
 
 
-def format_hanger_positions_html(templates, jig_orders, rotation, prev_positions=None):
-    """140개 행어 위치를 시각적으로 표시"""
+def format_hanger_positions_html(templates, jig_orders, rotation, prev_positions=None,
+                                  items=None, prod_key='prod', prev_grp_colors=None):
+    """140개 행어 위치를 시각적으로 표시
+
+    - 지그 교체: 빨간 왼쪽 테두리 (굵은 선)
+    - 컬러 교체: 빨간 점선 왼쪽 테두리
+    """
     tmpl = templates[rotation]
     order = jig_orders[rotation] if jig_orders and jig_orders[rotation] else sorted(tmpl.keys())
 
     curr_positions = order_to_positions(tmpl, order)
 
-    grp_colors = {
+    grp_colors_map = {
         'A': '#1976D2', 'B': '#388E3C', 'B2': '#2E7D32', 'C': '#F57C00', 'D': '#C2185B',
         'E': '#7B1FA2', 'F': '#0097A7', 'G': '#FFA000', 'H': '#5D4037', 'I': '#455A64'
     }
+
+    # 그룹별 주요 컬러 계산
+    curr_grp_colors = {}
+    if items:
+        for g in order:
+            color_prod = defaultdict(int)
+            for x in items:
+                if x.get('grp') == g:
+                    prod = x.get(prod_key, [0]*10)
+                    if rotation < len(prod) and prod[rotation] > 0:
+                        color_prod[x['clr']] += prod[rotation]
+            if color_prod:
+                curr_grp_colors[g] = max(color_prod.keys(), key=lambda c: color_prod[c])
 
     segments = []
     if curr_positions:
@@ -3225,19 +3243,22 @@ def format_hanger_positions_html(templates, jig_orders, rotation, prev_positions
             'count': len(curr_positions) - start
         })
 
-    change_positions = set()
+    # 지그 교체 위치
+    jig_change_positions = set()
     if prev_positions:
         for i in range(HANGERS):
             if i < len(prev_positions) and i < len(curr_positions):
                 if prev_positions[i] != curr_positions[i]:
-                    change_positions.add(i)
+                    jig_change_positions.add(i)
 
     html_parts = []
     html_parts.append('<div style="display:flex;align-items:center;gap:10px;margin:5px 0;">')
     html_parts.append('<span style="font-size:0.75em;color:#666;min-width:60px;">행어위치:</span>')
     html_parts.append('<div style="display:flex;flex-wrap:nowrap;border:1px solid #999;border-radius:4px;overflow:hidden;flex:1;">')
 
-    for seg in segments:
+    prev_seg_color = None
+    color_changes = 0
+    for idx, seg in enumerate(segments):
         grp = seg['grp']
         count = seg['count']
         start = seg['start']
@@ -3246,30 +3267,58 @@ def format_hanger_positions_html(templates, jig_orders, rotation, prev_positions
         if grp is None:
             color = '#E0E0E0'
             label = '-'
+            seg_paint_color = None
         else:
-            color = grp_colors.get(grp, '#9E9E9E')
+            color = grp_colors_map.get(grp, '#9E9E9E')
             label = grp
+            seg_paint_color = curr_grp_colors.get(grp)
 
-        has_change = any(pos in change_positions for pos in range(start, end + 1))
-        border_style = 'border-left:3px solid #F44336;' if has_change and start > 0 else ''
+        # 지그 교체 여부
+        has_jig_change = any(pos in jig_change_positions for pos in range(start, end + 1))
+
+        # 컬러 교체 여부 (이전 세그먼트와 비교)
+        has_color_change = False
+        if idx > 0 and prev_seg_color and seg_paint_color:
+            if prev_seg_color != seg_paint_color:
+                has_color_change = True
+                color_changes += 1
+
+        # 스타일 결정
+        if has_jig_change and start > 0:
+            border_style = 'border-left:3px solid #F44336;'  # 지그 교체: 굵은 빨간선
+        elif has_color_change:
+            border_style = 'border-left:3px dashed #F44336;'  # 컬러 교체: 빨간 점선
+        else:
+            border_style = ''
 
         width_pct = (count / HANGERS) * 100
+
+        # 컬러 정보 표시
+        color_label = f' [{seg_paint_color[:3]}]' if seg_paint_color else ''
 
         html_parts.append(
             f'<div style="width:{width_pct:.1f}%;background:{color};color:white;text-align:center;'
             f'font-size:0.7em;padding:2px 0;min-width:15px;{border_style}" '
-            f'title="위치 {start+1}-{end+1} ({count}행어)">'
+            f'title="위치 {start+1}-{end+1} ({count}행어) {seg_paint_color or ""}">'
             f'{label}<span style="font-size:0.8em;opacity:0.8;">({count})</span></div>'
         )
 
-    html_parts.append('</div>')
-
-    if change_positions:
-        html_parts.append(f'<span style="font-size:0.7em;color:#D32F2F;margin-left:5px;">교체:{len(change_positions)}개</span>')
+        prev_seg_color = seg_paint_color
 
     html_parts.append('</div>')
 
-    return ''.join(html_parts), curr_positions
+    # 교체 정보 표시
+    info_parts = []
+    if jig_change_positions:
+        info_parts.append(f'<span style="color:#D32F2F;">지그:{len(jig_change_positions)}</span>')
+    if color_changes > 0:
+        info_parts.append(f'<span style="color:#D32F2F;">컬러:{color_changes}</span>')
+    if info_parts:
+        html_parts.append(f'<span style="font-size:0.7em;margin-left:5px;">{" ".join(info_parts)}</span>')
+
+    html_parts.append('</div>')
+
+    return ''.join(html_parts), curr_positions, curr_grp_colors
 
 
 def generate_html_report(items, schedule_result):
@@ -3758,19 +3807,24 @@ def generate_html_report(items, schedule_result):
     legend_html = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;font-size:0.75em;">'
     for g, color in grp_colors_legend.items():
         legend_html += f'<span style="background:{color};color:white;padding:2px 6px;border-radius:3px;">{g}</span>'
-    legend_html += '<span style="border-left:3px solid #F44336;padding-left:5px;margin-left:10px;">= 지그교체</span></div>'
+    legend_html += '<span style="border-left:3px solid #F44336;padding-left:5px;margin-left:10px;">= 지그교체</span>'
+    legend_html += '<span style="border-left:3px dashed #F44336;padding-left:5px;margin-left:10px;">= 컬러교체</span></div>'
 
     # D0
     html += '<h3 style="margin-top:20px;color:#1565C0;">D0 생산계획</h3>'
     html += legend_html
 
     prev_positions_d0 = None
+    prev_grp_colors_d0 = None
     for r in range(10):
         shift_name = '주간' if r < 5 else '야간'
         shift_bg = '#E3F2FD' if r < 5 else '#E8EAF6'
         detail_html = format_rotation_items_html(items, r, 'prod', templates, jig_orders_d0)
-        hanger_html, curr_positions = format_hanger_positions_html(templates, jig_orders_d0, r, prev_positions_d0)
+        hanger_html, curr_positions, curr_grp_colors = format_hanger_positions_html(
+            templates, jig_orders_d0, r, prev_positions_d0,
+            items=items, prod_key='prod', prev_grp_colors=prev_grp_colors_d0)
         prev_positions_d0 = curr_positions
+        prev_grp_colors_d0 = curr_grp_colors
 
         html += f'''
             <div style="margin:8px 0;padding:10px;background:{shift_bg};border-radius:8px;">
@@ -3792,12 +3846,16 @@ def generate_html_report(items, schedule_result):
     # D+1
     html += '<h3 style="margin-top:20px;color:#2E7D32;">D+1 생산계획</h3>'
     prev_positions_d1 = prev_positions_d0
+    prev_grp_colors_d1 = prev_grp_colors_d0
     for r in range(10):
         shift_name = '주간' if r < 5 else '야간'
         shift_bg = '#E8F5E9' if r < 5 else '#F1F8E9'
         detail_html = format_rotation_items_html(items, r, 'prod1', templates_d1, jig_orders_d1)
-        hanger_html, curr_positions = format_hanger_positions_html(templates_d1, jig_orders_d1, r, prev_positions_d1)
+        hanger_html, curr_positions, curr_grp_colors = format_hanger_positions_html(
+            templates_d1, jig_orders_d1, r, prev_positions_d1,
+            items=items, prod_key='prod1', prev_grp_colors=prev_grp_colors_d1)
         prev_positions_d1 = curr_positions
+        prev_grp_colors_d1 = curr_grp_colors
 
         html += f'''
             <div style="margin:8px 0;padding:10px;background:{shift_bg};border-radius:8px;">
@@ -3819,12 +3877,16 @@ def generate_html_report(items, schedule_result):
     # D+2
     html += '<h3 style="margin-top:20px;color:#E65100;">D+2 생산계획</h3>'
     prev_positions_d2 = prev_positions_d1
+    prev_grp_colors_d2 = prev_grp_colors_d1
     for r in range(10):
         shift_name = '주간' if r < 5 else '야간'
         shift_bg = '#FFF3E0' if r < 5 else '#FBE9E7'
         detail_html = format_rotation_items_html(items, r, 'prod2', templates_d2_box, jig_orders_d2)
-        hanger_html, curr_positions = format_hanger_positions_html(templates_d2_box, jig_orders_d2, r, prev_positions_d2)
+        hanger_html, curr_positions, curr_grp_colors = format_hanger_positions_html(
+            templates_d2_box, jig_orders_d2, r, prev_positions_d2,
+            items=items, prod_key='prod2', prev_grp_colors=prev_grp_colors_d2)
         prev_positions_d2 = curr_positions
+        prev_grp_colors_d2 = curr_grp_colors
 
         html += f'''
             <div style="margin:8px 0;padding:10px;background:{shift_bg};border-radius:8px;">
