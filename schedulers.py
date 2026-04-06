@@ -433,15 +433,37 @@ def schedule_mip(items):
     gross_production = sum(sum(item['prod']) for item in items)
     net_production = gross_production - (empty_hangers * JIGS_PER_HANGER)
 
+    # 회전별 템플릿 및 컬러 추출 (리포트용)
+    templates = []
+    rotation_colors = []
+    for r in range(n_rotations):
+        # 템플릿: 그룹별 행어 수
+        template = {g: int(h[g, r].solution_value()) for g in groups}
+        templates.append(template)
+        # 회전에 사용된 컬러들
+        rot_colors = []
+        for i, item in enumerate(items):
+            if item['prod'][r] > 0 and item.get('clr'):
+                if item['clr'] not in rot_colors:
+                    rot_colors.append(item['clr'])
+        rotation_colors.append(rot_colors)
+
     return {
         'algorithm': 'MIP',
         'd0': {
             'color_changes': cc_count,
+            'cc_count': cc_count,  # 리포트 호환
             'empty_hangers': empty_hangers,
+            'cc_hangers': empty_hangers,  # 리포트 호환
             'jig_changes': jig_changes,
             'gross_production': gross_production,
-            'total_production': net_production  # 빈행어 손실 차감된 순생산량
-        }
+            'total_production': net_production,
+            'templates': templates,  # 리포트 호환
+            'colors': rotation_colors,  # 리포트 호환
+            'jig_orders': [None] * n_rotations  # 리포트 호환
+        },
+        'd1': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10},
+        'd2': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10}
     }
 
 
