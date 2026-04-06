@@ -818,6 +818,26 @@ def normalize_result(result):
     return result
 
 
+def calculate_ending_inventory(items):
+    """생산 후 기말재고 계산 (cur, cur1, cur2)"""
+    for x in items:
+        # D0 기말재고: stk - d0수요 + prod
+        stk = x.get('stk', 0)
+        for r in range(10):
+            stk = stk - x['d0'][r] + x.get('prod', [0]*10)[r]
+        x['cur'] = stk
+
+        # D+1 기말재고: cur - d1수요 + prod1
+        for r in range(10):
+            stk = stk - x.get('d1', [0]*10)[r] + x.get('prod1', [0]*10)[r]
+        x['cur1'] = stk
+
+        # D+2 기말재고: cur1 - d2수요 + prod2
+        for r in range(10):
+            stk = stk - x.get('d2', [0]*10)[r] + x.get('prod2', [0]*10)[r]
+        x['cur2'] = stk
+
+
 def run_scheduler(items, algorithm='heuristic'):
     """알고리즘별 스케줄러 실행"""
     if algorithm == 'heuristic':
@@ -836,16 +856,22 @@ def run_scheduler(items, algorithm='heuristic'):
 
     elif algorithm == 'mip':
         try:
-            return schedule_mip(items)
+            result = schedule_mip(items)
+            calculate_ending_inventory(items)  # 기말재고 계산
+            return result
         except Exception as e:
             import traceback
             return {'error': f'MIP 실행 오류: {e}', 'traceback': traceback.format_exc()[:500]}
 
     elif algorithm == 'color_first':
-        return schedule_color_first(items)
+        result = schedule_color_first(items)
+        calculate_ending_inventory(items)  # 기말재고 계산
+        return result
 
     elif algorithm == 'two_phase':
-        return schedule_two_phase(items)
+        result = schedule_two_phase(items)
+        calculate_ending_inventory(items)  # 기말재고 계산
+        return result
 
     else:
         return {'error': f'Unknown algorithm: {algorithm}'}
