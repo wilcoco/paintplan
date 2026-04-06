@@ -3335,6 +3335,7 @@ def generate_html_report(items, schedule_result):
     jig_changes = d0['jig_changes']
     cc_count = d0['cc_count']  # 컬러교환 횟수
     cc_hangers = d0['cc_hangers']  # 빈행어 손실
+    odd_jig_loss = d0.get('odd_jig_loss', 0)  # 홀수 생산 손실
     jig_orders_d0 = d0.get('jig_orders', [None]*10)
     jig_orders_d1 = d1.get('jig_orders', [None]*10)
     jig_orders_d2 = d2.get('jig_orders', [None]*10)
@@ -3544,6 +3545,14 @@ def generate_html_report(items, schedule_result):
                 <div class="summary-item warning">
                     <div class="summary-number">{cc_hangers}</div>
                     <div class="summary-label">D0 빈행어 손실</div>
+                </div>
+                <div class="summary-item warning">
+                    <div class="summary-number">{odd_jig_loss}</div>
+                    <div class="summary-label">D0 홀수 손실</div>
+                </div>
+                <div class="summary-item warning">
+                    <div class="summary-number">{cc_hangers * 2 + odd_jig_loss}</div>
+                    <div class="summary-label">D0 총 손실</div>
                 </div>
                 <div class="summary-item {day_jig_class}">
                     <div class="summary-number">{day_jig}/{HANGER_BUDGET_DAY}</div>

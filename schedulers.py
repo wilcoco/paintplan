@@ -611,11 +611,15 @@ def schedule_mip(items):
         prev_positions = curr_positions
 
     # 컬러교환 및 빈행어 계산 (특수컬러 15개 반영)
-    cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
+    # 손실 계산 (컬러교환 + 홀수)
+    losses = calculate_all_losses(items, 'prod')
+    cc_count = losses['cc_count']
+    empty_hangers = losses['empty_hangers']
+    odd_jig_loss = losses['odd_jig_loss']
 
-    # 순생산량 = 총생산량 - 빈행어손실 (빈행어 1개 = 2지그 = 2개 손실)
+    # 순생산량 = 총생산량 - 빈행어손실 - 홀수손실
     gross_production = sum(sum(item['prod']) for item in items)
-    net_production = gross_production - (empty_hangers * JIGS_PER_HANGER)
+    net_production = gross_production - losses['total_loss']
 
     # 회전별 템플릿 및 컬러 추출 (리포트용)
     templates = []
@@ -643,6 +647,7 @@ def schedule_mip(items):
             'cc_count': cc_count,  # 리포트 호환
             'empty_hangers': empty_hangers,
             'cc_hangers': empty_hangers,  # 리포트 호환
+            'odd_jig_loss': odd_jig_loss,  # 홀수 생산 손실
             'jig_changes': jig_changes,
             'gross_production': gross_production,
             'total_production': net_production,
@@ -650,8 +655,8 @@ def schedule_mip(items):
             'colors': rotation_colors,  # 리포트 호환
             'jig_orders': jig_orders  # 고정 순서 기반
         },
-        'd1': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10},
-        'd2': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10}
+        'd1': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10, 'odd_jig_loss': 0},
+        'd2': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10, 'odd_jig_loss': 0}
     }
 
 
@@ -762,11 +767,16 @@ def schedule_color_first(items):
     fill_capacity_for_safety_stock(items, rot_grp_prod)
 
     jig_changes = calculate_jig_changes(items)
-    cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
 
-    # 순생산량 = 총생산량 - 빈행어손실
+    # 손실 계산 (컬러교환 + 홀수)
+    losses = calculate_all_losses(items, 'prod')
+    cc_count = losses['cc_count']
+    empty_hangers = losses['empty_hangers']
+    odd_jig_loss = losses['odd_jig_loss']
+
+    # 순생산량 = 총생산량 - 빈행어손실 - 홀수손실
     gross_production = sum(sum(x['prod']) for x in items)
-    net_production = gross_production - (empty_hangers * JIGS_PER_HANGER)
+    net_production = gross_production - losses['total_loss']
 
     # 회전별 템플릿 및 컬러 추출 (리포트용)
     templates = []
@@ -792,6 +802,7 @@ def schedule_color_first(items):
             'cc_count': cc_count,
             'empty_hangers': empty_hangers,
             'cc_hangers': empty_hangers,
+            'odd_jig_loss': odd_jig_loss,
             'jig_changes': jig_changes,
             'gross_production': gross_production,
             'total_production': net_production,
@@ -799,8 +810,8 @@ def schedule_color_first(items):
             'colors': rotation_colors,
             'jig_orders': [None] * ROTATIONS
         },
-        'd1': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10},
-        'd2': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10}
+        'd1': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10, 'odd_jig_loss': 0},
+        'd2': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10, 'odd_jig_loss': 0}
     }
 
 
@@ -912,11 +923,16 @@ def schedule_two_phase(items):
     fill_capacity_for_safety_stock(items, rot_grp_prod)
 
     jig_changes = calculate_jig_changes(items)
-    cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
 
-    # 순생산량 = 총생산량 - 빈행어손실
+    # 모든 손실 계산 (컬러교환 + 홀수 손실)
+    losses = calculate_all_losses(items)
+    cc_count = losses['cc_count']
+    empty_hangers = losses['empty_hangers']
+    odd_jig_loss = losses['odd_jig_loss']
+
+    # 순생산량 = 총생산량 - 빈행어손실 - 홀수손실
     gross_production = sum(sum(x['prod']) for x in items)
-    net_production = gross_production - (empty_hangers * JIGS_PER_HANGER)
+    net_production = gross_production - losses['total_loss']
 
     # 회전별 템플릿 및 컬러 추출 (리포트용)
     templates = []
@@ -943,20 +959,51 @@ def schedule_two_phase(items):
             'empty_hangers': empty_hangers,
             'cc_hangers': empty_hangers,
             'jig_changes': jig_changes,
+            'odd_jig_loss': odd_jig_loss,
             'gross_production': gross_production,
             'total_production': net_production,
             'templates': templates,
             'colors': rotation_colors,
             'jig_orders': [None] * ROTATIONS
         },
-        'd1': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10},
-        'd2': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10}
+        'd1': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10, 'odd_jig_loss': 0},
+        'd2': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10, 'odd_jig_loss': 0}
     }
 
 
 # ============================================
-# 유틸리티: 컬러교환 계산
+# 유틸리티: 컬러교환 및 홀수 손실 계산
 # ============================================
+def calculate_odd_jig_loss(items, prod_key='prod'):
+    """컬러 그룹별 홀수 생산량으로 인한 지그 손실 계산
+
+    1행어 = 2지그, 같은 컬러는 행어 단위로 배치
+    홀수 생산량 → 마지막 행어에 빈 지그 1개 발생
+
+    Returns:
+        odd_loss: 총 손실 지그 수
+        odd_details: {(rotation, color): loss} 상세 정보
+    """
+    odd_loss = 0
+    odd_details = {}
+
+    for r in range(ROTATIONS):
+        # 회전별 컬러별 생산량 집계
+        color_prod = defaultdict(int)
+        for x in items:
+            prod = x.get(prod_key, [0] * 10)
+            if r < len(prod) and prod[r] > 0:
+                color_prod[x['clr']] += prod[r]
+
+        # 홀수 생산량 체크
+        for clr, qty in color_prod.items():
+            if qty % 2 == 1:  # 홀수
+                odd_loss += 1
+                odd_details[(r, clr)] = 1
+
+    return odd_loss, odd_details
+
+
 def calculate_color_changes(items, return_details=False):
     """회전별 컬러교환 횟수 및 빈행어 계산
 
@@ -986,6 +1033,33 @@ def calculate_color_changes(items, return_details=False):
     if return_details:
         return cc_count, empty_hangers
     return cc_count
+
+
+def calculate_all_losses(items, prod_key='prod'):
+    """모든 손실 통합 계산
+
+    Returns:
+        dict: {
+            'cc_count': 컬러교환 횟수,
+            'empty_hangers': 빈행어 수 (컬러교환),
+            'empty_hanger_loss': 빈행어로 인한 생산손실 (행어*2),
+            'odd_jig_loss': 홀수 생산으로 인한 지그 손실,
+            'total_loss': 총 손실
+        }
+    """
+    cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
+    odd_loss, _ = calculate_odd_jig_loss(items, prod_key)
+
+    empty_hanger_loss = empty_hangers * JIGS_PER_HANGER
+    total_loss = empty_hanger_loss + odd_loss
+
+    return {
+        'cc_count': cc_count,
+        'empty_hangers': empty_hangers,
+        'empty_hanger_loss': empty_hanger_loss,
+        'odd_jig_loss': odd_loss,
+        'total_loss': total_loss
+    }
 
 
 # ============================================
