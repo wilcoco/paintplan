@@ -586,7 +586,7 @@ def schedule_mip(items):
 
     solver.Minimize(CC_WEIGHT * total_color_starts + EMPTY_WEIGHT * empty_hanger_cost - total_production)
 
-    solver.SetTimeLimit(60000)  # 60초 (Railway 타임아웃 방지)
+    solver.SetTimeLimit(30000)  # 30초 (Railway 타임아웃 방지)
 
     # 풀이
     status = solver.Solve()
