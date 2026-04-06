@@ -325,7 +325,7 @@
                 }
 
                 if (!data.d0) {
-                    document.getElementById('scheduleResult').innerHTML = `<div class="alert alert-danger">스케줄링 결과가 올바르지 않습니다 (d0 없음)</div>`;
+                    document.getElementById('scheduleResult').innerHTML = `<div class="alert alert-danger">스케줄링 결과가 올바르지 않습니다 (d0 없음)<br><small>응답: ${JSON.stringify(data).substring(0, 500)}</small></div>`;
                     return;
                 }
 
