@@ -598,10 +598,17 @@ def schedule_mip(items):
     for i, item in enumerate(items):
         item['prod'] = [int(x[i, r].solution_value()) for r in range(n_rotations)]
 
-    # 지그교체 계산 (위치 기반 - 경계 이동량 합)
+    # 지그교체 계산 (실제 위치 비교 - 정확한 계산)
+    # MIP delta는 예산 제약용, 실제 값은 위치 비교로 계산
     jig_changes = [0] * n_rotations
-    for r in range(1, n_rotations):
-        jig_changes[r] = sum(int(delta[k, r].solution_value()) for k in range(n_groups - 1))
+    prev_positions = None
+    for r in range(n_rotations):
+        template = {g: int(h[g, r].solution_value()) for g in groups}
+        active_order = [g for g in ordered_groups if template.get(g, 0) > 0]
+        curr_positions = order_to_positions(template, active_order)
+        if prev_positions:
+            jig_changes[r] = calc_position_changes(prev_positions, curr_positions)
+        prev_positions = curr_positions
 
     # 컬러교환 및 빈행어 계산 (특수컬러 15개 반영)
     cc_count, empty_hangers = calculate_color_changes(items, return_details=True)
