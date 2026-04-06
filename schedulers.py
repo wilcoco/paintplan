@@ -195,6 +195,9 @@ def schedule_mip(items):
     - 용량 제약 (그룹별/회전별)
     - 지그교체 예산 (주간/야간 각 150행어)
     """
+    if not items:
+        return {'error': '스케줄링할 아이템이 없습니다.'}
+
     try:
         from ortools.linear_solver import pywraplp
     except ImportError as e:
@@ -857,7 +860,8 @@ def run_scheduler(items, algorithm='heuristic'):
     elif algorithm == 'mip':
         try:
             result = schedule_mip(items)
-            calculate_ending_inventory(items)  # 기말재고 계산
+            if 'error' not in result:  # 성공 시에만 재고 계산
+                calculate_ending_inventory(items)
             return result
         except Exception as e:
             import traceback
@@ -865,12 +869,14 @@ def run_scheduler(items, algorithm='heuristic'):
 
     elif algorithm == 'color_first':
         result = schedule_color_first(items)
-        calculate_ending_inventory(items)  # 기말재고 계산
+        if 'error' not in result:
+            calculate_ending_inventory(items)
         return result
 
     elif algorithm == 'two_phase':
         result = schedule_two_phase(items)
-        calculate_ending_inventory(items)  # 기말재고 계산
+        if 'error' not in result:
+            calculate_ending_inventory(items)
         return result
 
     else:

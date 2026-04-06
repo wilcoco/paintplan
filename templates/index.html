@@ -324,11 +324,17 @@
                     return;
                 }
 
+                if (!data.d0) {
+                    document.getElementById('scheduleResult').innerHTML = `<div class="alert alert-danger">스케줄링 결과가 올바르지 않습니다 (d0 없음)</div>`;
+                    return;
+                }
+
                 lastAlgorithm = algorithm;  // 성공 시 알고리즘 저장
 
                 const d0 = data.d0;
-                const dayJig = d0.jig_changes.slice(0,5).reduce((a,b)=>a+b,0);
-                const nightJig = d0.jig_changes.slice(5).reduce((a,b)=>a+b,0);
+                const jigChanges = d0.jig_changes || [0,0,0,0,0,0,0,0,0,0];
+                const dayJig = jigChanges.slice(0,5).reduce((a,b)=>a+b,0);
+                const nightJig = jigChanges.slice(5).reduce((a,b)=>a+b,0);
                 const algoLabel = algoNames[algorithm] || algorithm;
 
                 const gross = d0.gross_production || (d0.total_production + (d0.empty_hangers || 0) * 2);
