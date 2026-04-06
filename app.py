@@ -518,7 +518,17 @@ def api_schedule():
     try:
         from schedulers import run_scheduler
         items = load_data_from_db(demand_date)
+
+        if not items:
+            return jsonify({'error': f'데이터 없음: {demand_date}'}), 400
+
         result = run_scheduler(items, algorithm)
+
+        # 결과 검증
+        if result is None:
+            return jsonify({'error': 'run_scheduler가 None 반환'}), 500
+        if not isinstance(result, dict):
+            return jsonify({'error': f'결과가 dict 아님: {type(result)}'}), 500
 
         # 결과 캐시 (리포트용)
         cache_key = f"{demand_date}_{algorithm}"

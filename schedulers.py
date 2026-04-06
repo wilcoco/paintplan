@@ -1045,6 +1045,12 @@ def run_scheduler(items, algorithm='heuristic'):
     elif algorithm == 'mip':
         try:
             result = schedule_mip(items)
+            if result is None:
+                return {'error': 'MIP가 None을 반환했습니다'}
+            if not isinstance(result, dict):
+                return {'error': f'MIP가 dict가 아닌 값을 반환: {type(result)}'}
+            if 'error' not in result and 'd0' not in result:
+                return {'error': f'MIP 결과에 error도 d0도 없음: {list(result.keys())}'}
             if 'error' not in result:  # 성공 시에만 재고 계산
                 calculate_ending_inventory(items)
             return result
