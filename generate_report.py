@@ -93,8 +93,8 @@ def load_data():
             'prod2':[0]*10
         })
     wb.close()
-    # 재고 0인 아이템 제외 (생산계획 대상 아님)
-    items = [x for x in items if x['stk'] > 0]
+    # 수요 있는 아이템만 포함 (재고 0이어도 수요 있으면 생산 필요)
+    items = [x for x in items if x['d0t'] > 0 or x['d1t'] > 0 or x['d2t'] > 0 or x['stk'] > 0]
     return items
 
 
@@ -982,11 +982,13 @@ def schedule_day_v2(items, day_key, demand_key, prod_key, start_stock_key,
             rotation_color_detail, jig_orders, last_order, last_color)
 
 
-def schedule_d0_optimized(items):
+def schedule_d0_optimized(items, template_override=None):
     """
     D0 최적화 스케줄러 (scheduler_v10 로직 통합)
     - 컬러 블록 배칭으로 컬러교환 최소화
     - D0 필수 그룹 항상 포함
+
+    template_override: (template_dict, order_list) 튜플 - 외부에서 템플릿 지정 시
     """
     from collections import defaultdict
 
@@ -1075,18 +1077,37 @@ def schedule_d0_optimized(items):
         if d0_total + d1_morning > x['stk']:
             must_groups.add(g)
 
-    # Phase 3: 템플릿 결정 (시프트 내 안정화)
-    # 시프트별 단일 템플릿 → 지그교체 최소화
+    # Phase 3: 컬러 기반 최적 템플릿 결정
     templates, orders = [], []
 
-    # 시프트별 통합 템플릿 생성
-    def create_shift_template():
-        """실제 생산 필요한 그룹만 포함하는 템플릿"""
+    # ========================================
+    # Step 1: 컬러별 수요 분석
+    # ========================================
+    color_demand = defaultdict(int)  # 컬러별 총 D0 수요
+    color_groups = defaultdict(set)  # 컬러별 생산 가능 지그그룹
+    group_colors = defaultdict(set)  # 지그그룹별 생산 컬러
+
+    for x in items:
+        g, clr = x['grp'], x['clr']
+        if g and clr:
+            d0_total = sum(x['d0'])
+            color_demand[clr] += d0_total
+            color_groups[clr].add(g)
+            group_colors[g].add(clr)
+
+    # 수요 많은 컬러 순 정렬
+    sorted_colors = sorted(color_demand.keys(), key=lambda c: (-color_demand[c], c))
+
+    # ========================================
+    # Step 2: 컬러 기반 템플릿 최적화
+    # ========================================
+    def create_color_optimized_template():
+        """컬러교환 최소화를 위한 템플릿 생성"""
         template = {}
         remaining_h = HANGERS
 
-        # 그룹별 필요 용량 계산 (D0 + D+1 오전 수요 - 재고)
-        grp_need = defaultdict(int)
+        # 그룹별 필요 용량 (컬러 가중치 적용)
+        grp_need = defaultdict(float)
         for x in items:
             g = x['grp']
             if not g:
@@ -1094,45 +1115,50 @@ def schedule_d0_optimized(items):
             d0_total = sum(x['d0'])
             d1_morning = sum(x['d1'][:5])
             need = max(0, d0_total + d1_morning - x['stk'])
-            grp_need[g] += need
+
+            # 해당 컬러의 수요 순위에 따른 가중치
+            clr = x['clr']
+            if clr in sorted_colors[:5]:  # 상위 5개 컬러
+                weight = 1.5
+            elif clr in sorted_colors[:10]:
+                weight = 1.2
+            else:
+                weight = 1.0
+
+            grp_need[g] += need * weight
 
         total_need = sum(grp_need.values())
 
-        # 필요량 있는 그룹만 (필요량 순 정렬)
+        # 필요량 있는 그룹 (가중 필요량 순)
         must_list = sorted([g for g in all_groups if grp_need[g] > 0],
-                          key=lambda g: -grp_need[g])
+                          key=lambda g: (-grp_need[g], g))
 
         if not must_list:
-            # 수요 없으면 D0 수요 기준
             d0_grp_demand = defaultdict(int)
             for x in items:
                 if x['grp']:
                     d0_grp_demand[x['grp']] += sum(x['d0'])
             must_list = sorted([g for g in all_groups if d0_grp_demand[g] > 0],
-                              key=lambda g: -d0_grp_demand[g])
+                              key=lambda g: (-d0_grp_demand[g], g))
 
-        # 수요 비례 배분 (필요 그룹만)
+        # 배분
         for g in must_list:
             if remaining_h <= 0:
                 break
             max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
             pcs = JIG_INVENTORY[g]['pcs']
 
-            # 10회전 동안 필요한 행어 수
-            need_per_rot = grp_need[g] / 10 / (JIGS_PER_HANGER * pcs)
-
             if total_need > 0:
                 ideal = int(HANGERS * grp_need[g] / total_need)
             else:
                 ideal = HANGERS // len(must_list) if must_list else 10
 
-            # 필요량 기반 배분 (최소 5행어)
-            alloc = min(max_h, max(int(need_per_rot * 1.5), 5, ideal), remaining_h)
+            alloc = min(max_h, max(5, ideal), remaining_h)
             if alloc > 0:
                 template[g] = alloc
                 remaining_h -= alloc
 
-        # 남은 행어는 필요량 큰 그룹에 추가 배분
+        # 남은 행어 배분
         if remaining_h > 0 and must_list:
             for g in must_list:
                 if remaining_h <= 0:
@@ -1144,25 +1170,185 @@ def schedule_d0_optimized(items):
                     template[g] = current + add
                     remaining_h -= add
 
-        # 클러스터 기반 정렬: 같은 클러스터끼리 인접, 클러스터 내 행어 순
-        # 이렇게 하면 클러스터 내 컬러 공유 시 컬러교환 감소
-        order = sorted(template.keys(),
-                      key=lambda g: (CLUSTER_ORDER.get(GRP_TO_CLUSTER.get(g, 'Z'), 9),
-                                    -template.get(g, 0)))
-        return template, order
+        return template
 
-    # 주간/야간 동일 템플릿 사용
-    base_template, base_order = create_shift_template()
+    # ========================================
+    # Step 3: 컬러 기반 순서 최적화
+    # ========================================
+    def create_color_optimized_order(template):
+        """같은 컬러 그룹끼리 연속 배치"""
+        if not template:
+            return []
 
-    # 주간 (0-4): 동일 템플릿
-    for r in range(5):
-        templates.append(base_template.copy())
-        orders.append(list(base_order))
+        # 각 그룹의 주요 생산 컬러 결정
+        grp_main_color = {}
+        for g in template:
+            color_vol = defaultdict(int)
+            for x in items:
+                if x['grp'] == g:
+                    color_vol[x['clr']] += sum(x['d0'])
+            if color_vol:
+                grp_main_color[g] = max(color_vol.keys(), key=lambda c: (color_vol[c], c))
 
-    # 야간 (5-9): 동일 템플릿 (주간 마지막과 동일하므로 전환비용 0)
-    for r in range(5, 10):
-        templates.append(base_template.copy())
-        orders.append(list(base_order))
+        # 컬러별 그룹 묶기
+        color_to_grps = defaultdict(list)
+        for g, clr in grp_main_color.items():
+            color_to_grps[clr].append(g)
+
+        # 컬러 순서: 수요 많은 컬러 먼저
+        color_order = sorted(color_to_grps.keys(),
+                            key=lambda c: (-color_demand.get(c, 0), c))
+
+        # 순서 생성: 컬러별로 그룹 묶어서 배치
+        order = []
+        for clr in color_order:
+            grps = sorted(color_to_grps[clr], key=lambda g: (-template.get(g, 0), g))
+            order.extend(grps)
+
+        # 템플릿에 있지만 컬러 정보 없는 그룹 추가
+        for g in sorted(template.keys()):
+            if g not in order:
+                order.append(g)
+
+        return order
+
+    # 템플릿 생성 (외부 지정 또는 자동 생성)
+    if template_override:
+        base_template, base_order = template_override
+        # 외부 지정 시 동일 템플릿 사용
+        for r in range(10):
+            templates.append(base_template.copy())
+            orders.append(list(base_order))
+    else:
+        # ========================================
+        # 동적 템플릿 전략: 회전별 다른 템플릿 사용
+        # - 메인 그룹 (A, B, B2, H, I): 대부분 회전
+        # - 보조 그룹 (C, D, E, F, G): 필요한 회전만
+        # ========================================
+        MAIN_GROUPS = {'A', 'B', 'B2', 'H', 'I'}
+        SUPPLEMENTARY_GROUPS = {'C', 'D', 'E', 'F', 'G'}
+
+        # 각 그룹별 필요 생산량 계산
+        grp_need = defaultdict(int)
+        for x in items:
+            g = x['grp']
+            if not g:
+                continue
+            d0_total = sum(x['d0'])
+            d1_12 = sum(x['d1'][:2])  # D+1 1-2회전
+            need = max(0, d0_total + d1_12 - x['stk'])
+            grp_need[g] += need
+
+        # 보조 그룹별 필요 회전 수 계산
+        supplementary_rotations = {}
+        for g in SUPPLEMENTARY_GROUPS:
+            if grp_need[g] > 0:
+                max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+                cap_per_rot = max_h * JIGS_PER_HANGER * JIG_INVENTORY[g]['pcs']
+                rots_needed = (grp_need[g] + cap_per_rot - 1) // cap_per_rot
+                supplementary_rotations[g] = min(rots_needed, 10)
+
+        # 메인 템플릿 생성 (A, B, B2, H, I만)
+        def create_main_template():
+            template = {}
+            remaining = HANGERS
+            main_demand = {g: grp_need.get(g, 0) for g in MAIN_GROUPS if g in JIG_INVENTORY}
+            total_demand = sum(main_demand.values()) or 1
+
+            for g in sorted(main_demand.keys(), key=lambda x: (-main_demand[x], x)):
+                if remaining <= 0:
+                    break
+                max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+                ideal = max(5, int(HANGERS * main_demand[g] / total_demand))
+                alloc = min(max_h, ideal, remaining)
+                if alloc > 0:
+                    template[g] = alloc
+                    remaining -= alloc
+
+            # 남은 행어 배분
+            for g in sorted(main_demand.keys(), key=lambda x: (-main_demand[x], x)):
+                if remaining <= 0:
+                    break
+                max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+                add = min(remaining, max_h - template.get(g, 0))
+                if add > 0:
+                    template[g] = template.get(g, 0) + add
+                    remaining -= add
+
+            return template
+
+        # 보조 그룹 포함 템플릿 생성
+        def create_supplementary_template(supp_groups):
+            template = {}
+            remaining = HANGERS
+
+            # 보조 그룹 먼저 배분 (필요한 만큼만)
+            for g in supp_groups:
+                if g not in JIG_INVENTORY:
+                    continue
+                max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+                # 최소 필요 행어 (1회전 생산량)
+                alloc = min(max_h, 15, remaining)  # 최대 15행어
+                if alloc > 0:
+                    template[g] = alloc
+                    remaining -= alloc
+
+            # 나머지는 메인 그룹으로 채움
+            main_demand = {g: grp_need.get(g, 0) for g in MAIN_GROUPS if g in JIG_INVENTORY}
+            total_demand = sum(main_demand.values()) or 1
+
+            for g in sorted(main_demand.keys(), key=lambda x: (-main_demand[x], x)):
+                if remaining <= 0:
+                    break
+                max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+                ideal = max(5, int(remaining * main_demand[g] / total_demand))
+                alloc = min(max_h, ideal, remaining)
+                if alloc > 0:
+                    template[g] = template.get(g, 0) + alloc
+                    remaining -= alloc
+
+            # 남은 행어 배분
+            for g in sorted(main_demand.keys(), key=lambda x: (-main_demand[x], x)):
+                if remaining <= 0:
+                    break
+                max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+                add = min(remaining, max_h - template.get(g, 0))
+                if add > 0:
+                    template[g] = template.get(g, 0) + add
+                    remaining -= add
+
+            return template
+
+        main_template = create_main_template()
+        main_order = create_color_optimized_order(main_template)
+
+        # 회전별 템플릿 할당
+        # 보조 그룹이 필요한 회전 결정 (뒤에서부터 - 데드라인 여유)
+        supp_rotation_assignment = {}  # rotation -> set of supplementary groups
+
+        for g, rots_needed in sorted(supplementary_rotations.items(), key=lambda x: -x[1]):
+            # 뒤쪽 회전부터 할당 (리드타임 고려)
+            assigned = 0
+            for r in range(9, -1, -1):
+                if assigned >= rots_needed:
+                    break
+                if r not in supp_rotation_assignment:
+                    supp_rotation_assignment[r] = set()
+                supp_rotation_assignment[r].add(g)
+                assigned += 1
+
+        # 각 회전 템플릿 생성
+        for r in range(10):
+            if r in supp_rotation_assignment and supp_rotation_assignment[r]:
+                # 보조 그룹 포함 템플릿
+                supp_template = create_supplementary_template(supp_rotation_assignment[r])
+                supp_order = create_color_optimized_order(supp_template)
+                templates.append(supp_template)
+                orders.append(supp_order)
+            else:
+                # 메인 템플릿
+                templates.append(main_template.copy())
+                orders.append(list(main_order))
 
     # Phase 4: 생산 배분 (컬러 통합 최적화)
     # 전략: 주컬러 우선, 비주컬러는 최소 필수만 생산하고 지연
@@ -1185,21 +1371,27 @@ def schedule_d0_optimized(items):
         if clr:
             color_to_rotations[clr].append(r)
 
-    # 아이템별 데드라인 계산 (D0 + D+1 오전까지 부족 발생 회전)
+    # 아이템별 데드라인 계산 (D0 + D+1 1-2회전까지 부족 발생 회전)
+    # 2회전 리드타임 적용: R회전 부족 → R-2회전까지 생산 필요
+    # D+1-3부터는 D+1 생산으로 커버 가능하므로 D0 데드라인 계산에서 제외
+    LEAD_TIME = 2
+
     def calc_deadline(x):
-        """D0+D+1오전(15회전) 내 부족 발생 시점 반환, 없으면 15"""
+        """D0+D+1 1-2회전(12회전) 내 부족 발생 시점 - 리드타임 반환, 없으면 12"""
         stk = x.get('stk', 0)
         # D0 10회전
         for r in range(10):
             stk -= x['d0'][r]
             if stk < 0:
-                return r  # D0 r회전에서 부족
-        # D+1 오전 5회전
-        for r in range(5):
+                # D0 r회전에서 부족 → r-2까지 생산 필요
+                return max(0, r - LEAD_TIME)
+        # D+1 1-2회전만 (D+1-3~5는 D+1 생산으로 커버)
+        for r in range(2):
             stk -= x.get('d1', [0]*10)[r]
             if stk < 0:
-                return 10 + r  # D+1 r회전에서 부족
-        return 15  # 부족 없음
+                # D+1 r회전에서 부족 → D0 10+r-2 = 8+r까지 생산 필요
+                return max(0, 10 + r - LEAD_TIME)
+        return 12  # 부족 없음 (D0 10 + D+1 2회전)
 
     item_deadline = {id(x): calc_deadline(x) for x in items}
 
@@ -1373,41 +1565,68 @@ def schedule_d0_optimized(items):
                             x['prod'][r] += alloc
                             remaining -= alloc
 
-                # Step 3d: 그래도 남으면 나머지 컬러 (필요량 많은 순, 특수컬러 후순위)
-                # 컬러당 필요량 계산
-                color_needs = []
-                for clr in other_colors:
-                    if clr in colors_already_used or clr in adjacent_colors:
-                        continue
-                    total_need = 0
-                    for x in color_items[clr]:
-                        stk = item_stock[id(x)] + x['prod'][r]
-                        d0_rem = sum(x['d0'][r:])
-                        d1_tot = sum(x.get('d1', [0]*10))
-                        d2_tot = sum(x.get('d2', [0]*10))
-                        total_need += max(0, d0_rem + d1_tot + d2_tot - stk)
-                    if total_need > 0:
-                        is_special = 1 if clr.upper() in SPECIAL_COLORS else 0
-                        color_needs.append((clr, total_need, is_special))
+                # Step 3d: 용량 채우기 (D+1 오전 부족 우선, 컬러교환 최소화)
+                # 우선순위: 1) D+1 오전 부족 아이템, 2) 회전 주컬러, 3) 그룹 자체 주컬러
+                if remaining > 0:
+                    # 먼저 D+1 오전 부족 아이템에 배분
+                    all_grp_items = []
+                    for clr_list in color_items.values():
+                        all_grp_items.extend(clr_list)
 
-                # 필요량 많은 순 (특수컬러는 후순위)
-                color_needs.sort(key=lambda x: (x[2], -x[1]))
-
-                for clr, _, _ in color_needs:
-                    if remaining <= 0:
-                        break
-                    for x in color_items[clr]:
+                    for x in all_grp_items:
                         if remaining <= 0:
                             break
-                        stk = item_stock[id(x)] + x['prod'][r]
-                        d0_rem = sum(x['d0'][r:])
-                        d1_tot = sum(x.get('d1', [0]*10))
-                        d2_tot = sum(x.get('d2', [0]*10))
-                        need = max(0, d0_rem + d1_tot + d2_tot - stk)
-                        if need > 0:
+                        # D0 기말재고 계산 (현재까지 생산 포함)
+                        d0_end = x['stk']
+                        for rr in range(r+1):
+                            d0_end = d0_end - x['d0'][rr] + x['prod'][rr]
+                        for rr in range(r+1, 10):
+                            d0_end -= x['d0'][rr]
+                        # D+1 오전 부족 체크
+                        stk = d0_end
+                        for rr in range(5):
+                            stk -= x.get('d1', [0]*10)[rr]
+                        if stk < 0:
+                            # D+1 오전 부족 발생 예상 - 즉시 생산
+                            need = -stk
                             alloc = min(remaining, need)
                             x['prod'][r] += alloc
                             remaining -= alloc
+
+                    # 회전 주컬러로 채우기
+                    if main_clr and main_clr in color_items:
+                        main_items = [x for x in color_items[main_clr]]
+                        while remaining > 0 and main_items:
+                            produced_any = False
+                            for x in main_items:
+                                if remaining <= 0:
+                                    break
+                                x['prod'][r] += 1
+                                remaining -= 1
+                                produced_any = True
+                            if not produced_any:
+                                break
+
+                    # 아직 용량 남으면 그룹 자체 주컬러로 채우기
+                    if remaining > 0 and color_items:
+                        # 그룹 내 가장 수요 많은 컬러
+                        grp_clr_demand = {}
+                        for clr, clr_items in color_items.items():
+                            grp_clr_demand[clr] = sum(sum(x['d0']) for x in clr_items)
+                        if grp_clr_demand:
+                            grp_main_clr = max(grp_clr_demand.keys(), key=lambda c: grp_clr_demand[c])
+                            if grp_main_clr in color_items:
+                                grp_items = [x for x in color_items[grp_main_clr]]
+                                while remaining > 0 and grp_items:
+                                    produced_any = False
+                                    for x in grp_items:
+                                        if remaining <= 0:
+                                            break
+                                        x['prod'][r] += 1
+                                        remaining -= 1
+                                        produced_any = True
+                                    if not produced_any:
+                                        break
 
             # 남은 용량 저장 (2차 패스용)
             grp_remaining_cap[r][g] = remaining
@@ -1531,9 +1750,12 @@ def schedule_d0_optimized(items):
                     remaining_need -= add
 
     # =============================================
-    # D+1 오전(1-5회전) 부족분도 D0에서 미리 생산
-    # - D0 생산으로 D+1 오전까지 재고 부족 없어야 함
+    # D+1 1-2회전 부족분도 D0에서 미리 생산
+    # - 2회전 리드타임: D+1-3부터는 D+1 생산으로 커버 가능
     # =============================================
+
+    # Step 1: 그룹별 D+1 1-2회전 부족량 계산
+    grp_d1_morning_shortage = defaultdict(int)
     for x in items:
         g = x['grp']
         # D0 기말재고 계산
@@ -1541,15 +1763,79 @@ def schedule_d0_optimized(items):
         for r in range(10):
             d0_end_stk = d0_end_stk - x['d0'][r] + x['prod'][r]
 
-        # D+1 오전(1-5회전) 부족 체크
+        # D+1 1-2회전 부족 체크 (D+1-3~5는 D+1 생산으로 커버)
+        stk = d0_end_stk
+        for r in range(2):  # D+1-1, D+1-2만
+            stk -= x['d1'][r]
+            if stk < 0:
+                grp_d1_morning_shortage[g] += -stk
+                stk = 0  # 부족분 누적을 위해 리셋
+
+    # Step 2: 템플릿에 없는 그룹에 용량 추가
+    for g, shortage in grp_d1_morning_shortage.items():
+        if shortage <= 0:
+            continue
+        # 이미 템플릿에 충분한 용량이 있는지 확인
+        total_cap = 0
+        total_used = 0
+        for r in range(10):
+            tmpl_h = templates[r].get(g, 0)
+            cap = tmpl_h * JIGS_PER_HANGER * JIG_INVENTORY[g]['pcs']
+            used = rot_grp_used[r].get(g, 0)
+            total_cap += cap
+            total_used += used
+
+        if total_cap - total_used >= shortage:
+            continue  # 충분한 여유 있음
+
+        # 추가 필요 용량
+        additional_needed = shortage - (total_cap - total_used)
+        pcs = JIG_INVENTORY[g]['pcs']
+        hangers_needed = (additional_needed + (JIGS_PER_HANGER * pcs - 1)) // (JIGS_PER_HANGER * pcs)
+        max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+
+        # 각 회전에 용량 추가 (뒤에서부터)
+        for r in range(9, -1, -1):
+            if hangers_needed <= 0:
+                break
+            current = templates[r].get(g, 0)
+            can_add = min(hangers_needed, max_h - current)
+            if can_add > 0:
+                # 다른 그룹에서 빼기 (여유 있는 그룹)
+                for other_g in sorted(templates[r].keys(), key=lambda x: -templates[r].get(x, 0)):
+                    if other_g == g:
+                        continue
+                    if can_add <= 0:
+                        break
+                    other_used = rot_grp_used[r].get(other_g, 0)
+                    other_cap = templates[r][other_g] * JIGS_PER_HANGER * JIG_INVENTORY[other_g]['pcs']
+                    # 최소 1행어는 유지하고 사용 중인 용량 보존
+                    other_min = max(1, (other_used + JIGS_PER_HANGER * JIG_INVENTORY[other_g]['pcs'] - 1) // (JIGS_PER_HANGER * JIG_INVENTORY[other_g]['pcs']))
+                    can_reduce = templates[r][other_g] - other_min
+                    if can_reduce > 0:
+                        reduce = min(can_reduce, can_add)
+                        templates[r][other_g] -= reduce
+                        templates[r][g] = templates[r].get(g, 0) + reduce
+                        can_add -= reduce
+                        hangers_needed -= reduce
+
+    # Step 3: 아이템별 D+1 1-2회전 부족분 추가 생산
+    for x in items:
+        g = x['grp']
+        # D0 기말재고 계산
+        d0_end_stk = x['stk']
+        for r in range(10):
+            d0_end_stk = d0_end_stk - x['d0'][r] + x['prod'][r]
+
+        # D+1 1-2회전 부족 체크 (D+1-3~5는 D+1 생산 커버)
         stk = d0_end_stk
         d1_morning_shortage = 0
-        for r in range(5):  # D+1 오전
+        for r in range(2):  # D+1-1, D+1-2만
             stk -= x['d1'][r]
             if stk < 0:
                 d1_morning_shortage = max(d1_morning_shortage, -stk)
 
-        # D+1 오전 부족분을 D0에서 추가 생산
+        # D+1 1-2회전 부족분을 D0에서 추가 생산
         if d1_morning_shortage > 0:
             remaining_need = d1_morning_shortage
             # D0 뒤에서부터 여유 용량 찾기
@@ -1567,6 +1853,82 @@ def schedule_d0_optimized(items):
                     remaining_need -= add
 
     # 재고 재계산
+    for x in items:
+        item_stock[id(x)] = x['stk']
+        for r in range(10):
+            item_stock[id(x)] = item_stock[id(x)] - x['d0'][r] + x['prod'][r]
+
+    # =============================================
+    # D+1 1-2회전 부족 재분배 (핵심 제약조건)
+    # - 같은 그룹 내에서 과잉 생산 아이템 → 부족 아이템으로 이동
+    # =============================================
+    def calc_d1_morning_shortage(x):
+        """D0 생산만으로 D+1 1-2회전까지 부족 수량"""
+        d0_end = x['stk']
+        for r in range(10):
+            d0_end = d0_end - x['d0'][r] + x['prod'][r]
+        stk = d0_end
+        max_shortage = 0
+        for r in range(2):  # D+1-1, D+1-2만
+            stk -= x.get('d1', [0]*10)[r]
+            if stk < 0:
+                max_shortage = max(max_shortage, -stk)
+        return max_shortage
+
+    def calc_d1_morning_excess(x):
+        """D0 생산으로 D+1 1-2회전까지 여유 수량 (차감 가능량)"""
+        d0_end = x['stk']
+        for r in range(10):
+            d0_end = d0_end - x['d0'][r] + x['prod'][r]
+        stk = d0_end
+        min_stk = d0_end
+        for r in range(2):  # D+1-1, D+1-2만
+            stk -= x.get('d1', [0]*10)[r]
+            min_stk = min(min_stk, stk)
+        return max(0, min_stk)  # 가장 낮은 시점 기준 여유
+
+    # 그룹별로 부족/과잉 재분배
+    for g in set(x['grp'] for x in items):
+        grp_items = [x for x in items if x['grp'] == g]
+
+        for iteration in range(20):  # 최대 20회 반복
+            # 현재 부족/과잉 계산
+            shortage_items = [(x, calc_d1_morning_shortage(x)) for x in grp_items]
+            shortage_items = [(x, s) for x, s in shortage_items if s > 0]
+
+            if not shortage_items:
+                break  # 부족 없음
+
+            excess_items = [(x, calc_d1_morning_excess(x)) for x in grp_items]
+            excess_items = [(x, e) for x, e in excess_items if e > 0 and sum(x['prod']) > 0]
+
+            if not excess_items:
+                break  # 차감 가능 항목 없음
+
+            # 가장 부족한 아이템에 가장 여유 있는 아이템에서 이동
+            shortage_items.sort(key=lambda t: -t[1])
+            excess_items.sort(key=lambda t: -t[1])
+
+            shortage_x, shortage_amt = shortage_items[0]
+            excess_x, excess_amt = excess_items[0]
+
+            # 회전별로 이동 (뒤에서부터)
+            moved = 0
+            for r in range(9, -1, -1):
+                if moved >= shortage_amt:
+                    break
+                if excess_x['prod'][r] > 0:
+                    # 이동량 결정 (최대 shortage_amt, excess_amt, prod[r] 중 최소)
+                    transfer = min(shortage_amt - moved, excess_amt, excess_x['prod'][r])
+                    if transfer > 0:
+                        excess_x['prod'][r] -= transfer
+                        shortage_x['prod'][r] += transfer
+                        moved += transfer
+
+            if moved == 0:
+                break  # 더 이상 이동 불가
+
+    # 재고 최종 재계산
     for x in items:
         item_stock[id(x)] = x['stk']
         for r in range(10):
@@ -1820,6 +2182,57 @@ def schedule_d0_optimized(items):
             return max(clr_prod.keys(), key=lambda c: (clr_prod[c], c))
         return None
 
+    def get_grp_all_colors(grp, rot):
+        """그룹 내 생산되는 모든 컬러 (생산량 순 정렬)"""
+        clr_prod = defaultdict(int)
+        for x in items:
+            if x['grp'] == grp:
+                if x['prod'][rot] > 0:
+                    clr_prod[x['clr']] += x['prod'][rot]
+        if clr_prod:
+            # 생산량 많은 순, 같으면 알파벳 순
+            return sorted(clr_prod.keys(), key=lambda c: (-clr_prod[c], c))
+        return []
+
+    def get_grp_colors_optimized(grp, rot, prev_color, next_color):
+        """그룹 내 컬러 순서 최적화 (이전/다음 컬러 고려)"""
+        clr_prod = defaultdict(int)
+        for x in items:
+            if x['grp'] == grp:
+                if x['prod'][rot] > 0:
+                    clr_prod[x['clr']] += x['prod'][rot]
+        if not clr_prod:
+            return []
+
+        colors = list(clr_prod.keys())
+        if len(colors) <= 1:
+            return colors
+
+        # 최적 순서 찾기: 이전 컬러와 같은 것 먼저, 다음 컬러와 같은 것 마지막
+        result = []
+        remaining = set(colors)
+
+        # 이전 컬러와 같은 것 먼저
+        if prev_color and prev_color in remaining:
+            result.append(prev_color)
+            remaining.remove(prev_color)
+
+        # 다음 컬러와 같은 것은 마지막에 넣기 위해 분리
+        last_color = None
+        if next_color and next_color in remaining and next_color != prev_color:
+            last_color = next_color
+            remaining.remove(next_color)
+
+        # 나머지는 생산량 순
+        for c in sorted(remaining, key=lambda c: (-clr_prod[c], c)):
+            result.append(c)
+
+        # 다음 컬러와 같은 것 마지막에
+        if last_color:
+            result.append(last_color)
+
+        return result
+
     cc_count_total = 0  # 컬러교환 횟수
     cc_hangers_total = 0  # 빈행어 합계
     cc_count_per_rot = [0] * 10
@@ -1827,11 +2240,25 @@ def schedule_d0_optimized(items):
     prev_clr = None
     for r in range(10):
         colors_ord = []
-        for g in orders[r]:
+        order_list = orders[r]
+        for idx, g in enumerate(order_list):
             if g in templates[r] and templates[r][g] > 0:
-                clr = get_grp_main_clr(g, r)
-                if clr:
-                    colors_ord.append(clr)
+                # 다음 그룹의 메인 컬러 확인
+                next_color = None
+                for next_idx in range(idx + 1, len(order_list)):
+                    next_g = order_list[next_idx]
+                    if next_g in templates[r] and templates[r][next_g] > 0:
+                        next_color = get_grp_main_clr(next_g, r)
+                        break
+
+                # 현재 그룹의 마지막 컬러 (이전 그룹에서 온 컬러)
+                current_prev = colors_ord[-1] if colors_ord else prev_clr
+
+                # 그룹 내 컬러 순서 최적화
+                grp_colors = get_grp_colors_optimized(g, r, current_prev, next_color)
+                for clr in grp_colors:
+                    if clr:
+                        colors_ord.append(clr)
         if prev_clr and colors_ord and colors_ord[0] != prev_clr:
             cc_count_per_rot[r] += 1
             cc_hangers_per_rot[r] += get_cc_cost(prev_clr, colors_ord[0])
@@ -1871,11 +2298,384 @@ def schedule_d0_optimized(items):
 
 def schedule(items):
     """D0, D+1, D+2 전체 스케줄링 (최적화 버전)"""
+    import copy
 
-    # D0 스케줄링 (최적화)
-    (templates_d0, rotation_color_d0, jig_changes_d0, cc_count_d0, cc_hangers_d0,
-     cc_count_per_rot_d0, cc_hangers_per_rot_d0,
-     color_detail_d0, jig_orders_d0, d0_last_order, d0_last_color) = schedule_d0_optimized(items)
+    # ========================================
+    # 템플릿 후보 생성 및 최적 선택
+    # ========================================
+    def generate_template_candidates(items):
+        """
+        인간 방식 템플릿 후보 생성
+        - 기본: NQ계열(B, B2, I)을 앞에 배치
+        - 추가: TH계열(A, H), JX계열(D, E, F, G), OV(C) 조합
+        """
+        from collections import defaultdict
+        from itertools import combinations
+
+        candidates = []
+
+        # 그룹별 수요 분석
+        grp_demand = defaultdict(int)
+        for x in items:
+            g = x['grp']
+            if g:
+                grp_demand[g] += sum(x['d0'])
+
+        # ========================================
+        # 그룹 클러스터 정의 (인간 방식)
+        # ========================================
+        NQ_GROUPS = ['B', 'B2', 'I']      # NQ5 계열 (기본)
+        TH_GROUPS = ['A', 'H']             # THPE 계열
+        JX_GROUPS = ['D', 'E', 'F', 'G']   # JX/AX 계열
+        OV_GROUPS = ['C']                  # OV1
+
+        # ========================================
+        # 템플릿 생성 헬퍼 함수
+        # ========================================
+        def make_template_from_groups(group_list, name):
+            """주어진 그룹 목록으로 템플릿 생성 (수요 비례 배분)"""
+            if not group_list:
+                return None
+
+            # 해당 그룹들의 수요
+            demands = {g: grp_demand.get(g, 0) for g in group_list if g in JIG_INVENTORY}
+            if not demands:
+                return None
+
+            total_demand = sum(demands.values())
+            if total_demand == 0:
+                # 수요 없으면 균등 배분
+                total_demand = len(demands)
+                demands = {g: 1 for g in demands}
+
+            template = {}
+            remaining = HANGERS
+
+            # 수요 비례로 배분
+            sorted_grps = sorted(demands.keys(), key=lambda g: (-demands[g], g))
+            for g in sorted_grps:
+                if remaining <= 0:
+                    break
+                max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+                ideal = max(5, int(HANGERS * demands[g] / total_demand))
+                alloc = min(max_h, ideal, remaining)
+                if alloc > 0:
+                    template[g] = alloc
+                    remaining -= alloc
+
+            # 남은 행어 배분
+            for g in sorted_grps:
+                if remaining <= 0:
+                    break
+                max_h = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+                add = min(remaining, max_h - template.get(g, 0))
+                if add > 0:
+                    template[g] = template.get(g, 0) + add
+                    remaining -= add
+
+            if sum(template.values()) != HANGERS:
+                return None  # 140행어 못 채우면 무효
+
+            # 순서: NQ를 앞에, 나머지는 클러스터 순
+            order = []
+            # NQ 먼저
+            for g in ['B', 'B2', 'I']:
+                if g in template:
+                    order.append(g)
+            # TH
+            for g in ['A', 'H']:
+                if g in template and g not in order:
+                    order.append(g)
+            # JX/AX
+            for g in ['D', 'E', 'F', 'G']:
+                if g in template and g not in order:
+                    order.append(g)
+            # OV
+            if 'C' in template and 'C' not in order:
+                order.append('C')
+
+            return (name, template, order)
+
+        # ========================================
+        # 메인 그룹만 사용 (컬러교환 최소화)
+        # C, D, E, F, G는 나중에 필요 회전에만 추가
+        # ========================================
+
+        # 메인 템플릿: NQ + TH만 (A, B, B2, H, I)
+        result = make_template_from_groups(NQ_GROUPS + TH_GROUPS, 'NQ_TH_MAIN')
+        if result:
+            candidates.append(result)
+
+        # 아래 후보들은 컬러교환 증가하므로 제외
+        # # 타입 A 변형: NQ + TH + C (OV 추가)
+        # result = make_template_from_groups(NQ_GROUPS + TH_GROUPS + OV_GROUPS, 'NQ_TH_OV')
+        # if result:
+        #     candidates.append(result)
+
+        # # 타입 B: NQ + JX일부 (D만)
+        # result = make_template_from_groups(NQ_GROUPS + ['D'], 'NQ_D')
+        # if result:
+        #     candidates.append(result)
+
+        # # 타입 C: NQ + TH + D
+        # result = make_template_from_groups(NQ_GROUPS + TH_GROUPS + ['D'], 'NQ_TH_D')
+        # if result:
+        #     candidates.append(result)
+
+        # 전체 그룹은 사용하지 않음 (컬러교환 과다)
+        all_groups = NQ_GROUPS + TH_GROUPS  # + JX_GROUPS + OV_GROUPS 제외
+        result = make_template_from_groups(all_groups, 'ALL_GROUPS')
+        if result:
+            candidates.append(result)
+
+        # NQ만 (수요 집중)
+        result = make_template_from_groups(NQ_GROUPS, 'NQ_ONLY')
+        if result:
+            candidates.append(result)
+
+        # NQ + A (TH의 STD만)
+        result = make_template_from_groups(NQ_GROUPS + ['A'], 'NQ_A')
+        if result:
+            candidates.append(result)
+
+        # NQ + A + H (TH 전체)
+        result = make_template_from_groups(NQ_GROUPS + ['A', 'H'], 'NQ_A_H')
+        if result:
+            candidates.append(result)
+
+        # ========================================
+        # 행어 배분 변형 (동일 그룹, 다른 배분)
+        # ========================================
+
+        # NQ + TH에서 A 최대화 변형
+        t_a_max = {'B': 25, 'B2': 25, 'I': 35, 'A': 50, 'H': 5}  # A 최대
+        if sum(t_a_max.values()) == HANGERS:
+            candidates.append(('NQ_TH_Amax', t_a_max, ['B', 'B2', 'I', 'A', 'H']))
+
+        # NQ + TH에서 I 최대화 변형
+        t_i_max = {'B': 25, 'B2': 25, 'I': 35, 'A': 30, 'H': 25}  # I 최대
+        if sum(t_i_max.values()) == HANGERS:
+            candidates.append(('NQ_TH_Imax', t_i_max, ['B', 'B2', 'I', 'A', 'H']))
+
+        # NQ 집중 (B2 최대)
+        t_b2_max = {'B': 50, 'B2': 25, 'I': 35, 'A': 30}  # B 최대
+        if sum(t_b2_max.values()) == HANGERS:
+            candidates.append(('NQ_Bmax', t_b2_max, ['B', 'B2', 'I', 'A']))
+
+        # ========================================
+        # A 최대화 변형 (검증된 최적 템플릿들)
+        # ========================================
+
+        # 기존 최적 (CC=18)
+        t_best = {'A': 50, 'H': 25, 'I': 35, 'B2': 25, 'B': 5}
+        if sum(t_best.values()) == HANGERS:
+            candidates.append(('A50_best', t_best, ['B', 'B2', 'I', 'A', 'H']))
+
+        # A50 변형들 (CC=18 확인됨)
+        t_v2 = {'A': 50, 'H': 25, 'I': 35, 'B2': 20, 'B': 10}
+        if sum(t_v2.values()) == HANGERS:
+            candidates.append(('A50_v2', t_v2, ['B', 'B2', 'I', 'A', 'H']))
+
+        t_v3 = {'A': 50, 'H': 25, 'I': 30, 'B2': 25, 'B': 10}
+        if sum(t_v3.values()) == HANGERS:
+            candidates.append(('A50_v3', t_v3, ['B', 'B2', 'I', 'A', 'H']))
+
+        # I 감소 변형
+        t_i25 = {'A': 50, 'H': 25, 'I': 25, 'B2': 25, 'B': 15}
+        if sum(t_i25.values()) == HANGERS:
+            candidates.append(('A50_I25', t_i25, ['B', 'B2', 'I', 'A', 'H']))
+
+        # H 감소 변형
+        t_h15 = {'A': 50, 'H': 15, 'I': 35, 'B2': 25, 'B': 15}
+        if sum(t_h15.values()) == HANGERS:
+            candidates.append(('A50_H15', t_h15, ['B', 'B2', 'I', 'A', 'H']))
+
+        return candidates
+
+
+    # 템플릿 후보 생성
+    template_candidates = generate_template_candidates(items)
+
+    # 후보 0: 기본 템플릿 (schedule_d0_optimized 내부 로직)
+    # 이 템플릿을 먼저 테스트
+    items_base = copy.deepcopy(items)
+    base_result = schedule_d0_optimized(items_base, template_override=None)
+    base_cc = base_result[3]
+    base_jig = base_result[2]
+    base_day = sum(base_jig[:5])
+    base_night = sum(base_jig[5:])
+
+    # 각 템플릿으로 스케줄링 시도
+    best_result = None
+    best_cc = float('inf')
+    best_template_name = None
+    best_items = None
+
+    def count_inventory_shortage(items_after_schedule):
+        """D0 각 회전 시점에서 재고부족 총량 계산"""
+        total_shortage = 0
+        for x in items_after_schedule:
+            stk = x['stk']
+            for r in range(10):
+                stk = stk - x['d0'][r]
+                if stk < 0:
+                    total_shortage += (-stk)
+                    stk = 0
+                stk = stk + x['prod'][r]
+        return total_shortage
+
+    def count_d1_morning_shortage(items_after_schedule):
+        """D0 생산만으로 D+1 1-2회전 재고부족 총량 계산
+        (2회전 리드타임: D+1-3부터는 D+1 생산으로 커버 가능)"""
+        total_shortage = 0
+        for x in items_after_schedule:
+            d0_end = x['stk']
+            for r in range(10):
+                d0_end = d0_end - x['d0'][r] + x['prod'][r]
+            stk = d0_end
+            # D+1-1, D+1-2만 체크 (D+1-3~5는 D+1 생산으로 커버 가능)
+            for r in range(2):
+                stk -= x.get('d1', [0]*10)[r]
+                if stk < 0:
+                    total_shortage += (-stk)
+                    stk = 0
+        return total_shortage
+
+    # 기본 템플릿이 예산 내이면 기준으로 설정 (부족량도 저장)
+    base_shortage = count_inventory_shortage(items_base)
+    base_d1_morning = count_d1_morning_shortage(items_base)
+    best_d1_morning = float('inf')
+
+    if base_day <= HANGER_BUDGET_DAY and base_night <= HANGER_BUDGET_NIGHT:
+        best_result = base_result
+        best_cc = base_cc
+        best_d1_morning = base_d1_morning
+        best_template_name = 'base_color_optimized'
+        best_items = items_base
+
+    for name, tmpl, order in template_candidates:
+        # items 깊은 복사
+        items_copy = copy.deepcopy(items)
+
+        # 스케줄링 실행
+        result = schedule_d0_optimized(items_copy, template_override=(tmpl, order))
+
+        cc_count = result[3]  # cc_count_d0
+
+        # 행어교체 예산 체크
+        jig_changes = result[2]
+        day_changes = sum(jig_changes[:5])
+        night_changes = sum(jig_changes[5:])
+
+        # 재고부족량 계산
+        shortage_amount = count_inventory_shortage(items_copy)
+        d1_morning_shortage = count_d1_morning_shortage(items_copy)
+
+        if day_changes <= HANGER_BUDGET_DAY and night_changes <= HANGER_BUDGET_NIGHT and shortage_amount <= base_shortage:
+            # 선택 기준: 1) D+1 오전 부족 최소화, 2) 컬러교환 최소화
+            is_better = False
+            if d1_morning_shortage < best_d1_morning:
+                is_better = True  # D+1 오전 부족이 더 적음
+            elif d1_morning_shortage == best_d1_morning and cc_count < best_cc:
+                is_better = True  # D+1 오전 부족 동일, 컬러교환 더 적음
+
+            if is_better:
+                best_cc = cc_count
+                best_d1_morning = d1_morning_shortage
+                best_result = result
+                best_template_name = name
+                best_items = items_copy
+
+    # 최적 결과가 없으면 기본 실행
+    if best_result is None:
+        (templates_d0, rotation_color_d0, jig_changes_d0, cc_count_d0, cc_hangers_d0,
+         cc_count_per_rot_d0, cc_hangers_per_rot_d0,
+         color_detail_d0, jig_orders_d0, d0_last_order, d0_last_color) = schedule_d0_optimized(items)
+    else:
+        (templates_d0, rotation_color_d0, jig_changes_d0, cc_count_d0, cc_hangers_d0,
+         cc_count_per_rot_d0, cc_hangers_per_rot_d0,
+         color_detail_d0, jig_orders_d0, d0_last_order, d0_last_color) = best_result
+
+        # 원본 items에 최적 결과 적용
+        for i, x in enumerate(items):
+            x['prod'] = best_items[i]['prod']
+
+    # =============================================
+    # D+1 1-2회전 부족 그룹 템플릿 보완
+    # - 템플릿에 없는 그룹에 최소 용량 추가
+    # =============================================
+    from collections import defaultdict as dd_grp
+    grp_d1_morning_need = dd_grp(int)
+    for x in items:
+        g = x['grp']
+        # D0 기말재고 계산
+        d0_end = x['stk']
+        for r in range(10):
+            d0_end = d0_end - x['d0'][r] + x['prod'][r]
+        # D+1 1-2회전 부족 계산
+        stk = d0_end
+        for r in range(2):  # D+1-1, D+1-2만
+            stk -= x.get('d1', [0]*10)[r]
+            if stk < 0:
+                grp_d1_morning_need[g] += -stk
+                stk = 0
+
+    # 현재 생산량 계산 (템플릿 수정 전)
+    rot_grp_production = [{} for _ in range(10)]
+    for r in range(10):
+        for x in items:
+            g_prod = x['grp']
+            if g_prod not in rot_grp_production[r]:
+                rot_grp_production[r][g_prod] = 0
+            rot_grp_production[r][g_prod] += x['prod'][r]
+
+    # 템플릿에 없거나 용량 부족한 그룹에 추가
+    for g, need in sorted(grp_d1_morning_need.items(), key=lambda x: -x[1]):
+        if need <= 0:
+            continue
+        # 현재 템플릿 용량 확인
+        pcs = JIG_INVENTORY.get(g, {'pcs': 1})['pcs']
+        max_h = JIG_INVENTORY.get(g, {'max_jigs': 10})['max_jigs'] // JIGS_PER_HANGER
+        total_cap = sum(templates_d0[r].get(g, 0) * JIGS_PER_HANGER * pcs for r in range(10))
+
+        if total_cap >= need:
+            continue  # 이미 충분
+
+        # 필요 추가 행어 계산
+        hangers_to_add = (need - total_cap + JIGS_PER_HANGER * pcs - 1) // (JIGS_PER_HANGER * pcs)
+        hangers_to_add = min(hangers_to_add, max_h * 3)  # 최대 3회전 분량으로 제한
+
+        # 특정 회전에만 분배 (뒤쪽 8,9,10회전만 - 컬러교환 최소화)
+        # D+1 1-2회전 커버를 위해 D0 후반부에 집중
+        target_rotations = [9, 8, 7]  # 우선순위: 10, 9, 8회전 (0-indexed)
+
+        for r in target_rotations:
+            if hangers_to_add <= 0:
+                break
+            current = templates_d0[r].get(g, 0)
+            can_add = min(max_h - current, hangers_to_add)
+            if can_add <= 0:
+                continue
+
+            # 가장 행어 많은 그룹에서 빼기 (실제 사용량 초과 금지)
+            for other_g in sorted(templates_d0[r].keys(), key=lambda x: -templates_d0[r].get(x, 0)):
+                if other_g == g or other_g not in templates_d0[r]:
+                    continue
+                if can_add <= 0:
+                    break
+                other_current = templates_d0[r][other_g]
+                other_pcs = JIG_INVENTORY.get(other_g, {'pcs': 1})['pcs']
+                # 실제 사용량 기준 최소 행어 계산
+                other_used = rot_grp_production[r].get(other_g, 0)
+                other_min_h = (other_used + JIGS_PER_HANGER * other_pcs - 1) // (JIGS_PER_HANGER * other_pcs)
+                other_min_h = max(1, other_min_h)  # 최소 1행어
+                can_reduce = other_current - other_min_h
+                if can_reduce > 0:
+                    reduce = min(can_reduce, can_add)
+                    templates_d0[r][other_g] -= reduce
+                    templates_d0[r][g] = templates_d0[r].get(g, 0) + reduce
+                    can_add -= reduce
+                    hangers_to_add -= reduce
 
     # D+1 부족분 선반영 (용량 제한 적용)
     # 회전별 지그그룹별 사용량 계산
@@ -1916,12 +2716,98 @@ def schedule(items):
                     d0_rotation_used[pr][g] = used + add
                     remaining_deficit -= add
 
-    # D0 기말재고 계산
+    # =============================================
+    # D+1 1-2회전 부족 그룹 내 재분배 (핵심 제약조건)
+    # - 같은 그룹 내에서 과잉 → 부족으로 이동
+    # =============================================
+    def calc_d1_morning_shortage_final(x):
+        """D0 생산만으로 D+1 1-2회전까지 부족 수량"""
+        d0_end = x['stk']
+        for r in range(10):
+            d0_end = d0_end - x['d0'][r] + x['prod'][r]
+        stk = d0_end
+        max_shortage = 0
+        for r in range(2):  # D+1-1, D+1-2만
+            stk -= x.get('d1', [0]*10)[r]
+            if stk < 0:
+                max_shortage = max(max_shortage, -stk)
+        return max_shortage
+
+    def calc_d1_morning_excess_final(x):
+        """D0 생산으로 D+1 1-2회전까지 여유 수량"""
+        d0_end = x['stk']
+        for r in range(10):
+            d0_end = d0_end - x['d0'][r] + x['prod'][r]
+        stk = d0_end
+        min_stk = d0_end
+        for r in range(2):  # D+1-1, D+1-2만
+            stk -= x.get('d1', [0]*10)[r]
+            min_stk = min(min_stk, stk)
+        return max(0, min_stk)
+
+    # D0 기말재고 계산 (빈행어 차감 전)
     for x in items:
         stk = x['stk']
         for r in range(10):
             stk = stk - x['d0'][r] + x['prod'][r]
         x['cur'] = stk
+
+    # D+1 선반영 후 color_detail 및 컬러교환 재계산
+    # (schedule_d0_optimized 이후 추가 생산이 발생했으므로)
+    from collections import defaultdict as dd
+    color_detail_d0 = []
+    for r in range(10):
+        detail = dd(int)
+        for x in items:
+            if x['prod'][r] > 0:
+                detail[x['clr']] += x['prod'][r]
+        color_detail_d0.append(dict(detail))
+
+    # 컬러교환 재계산
+    SPECIAL_COLORS = {'MGG', 'T4M', 'UMA', 'ZRM', 'ISM', 'MRM'}
+
+    def get_cc_cost_local(from_clr, to_clr):
+        return 15 if from_clr in SPECIAL_COLORS else 1
+
+    def get_grp_colors_for_cc(grp, rot):
+        clr_prod = dd(int)
+        for x in items:
+            if x['grp'] == grp and x['prod'][rot] > 0:
+                clr_prod[x['clr']] += x['prod'][rot]
+        if clr_prod:
+            return sorted(clr_prod.keys(), key=lambda c: (-clr_prod[c], c))
+        return []
+
+    cc_count_d0 = 0
+    cc_hangers_d0 = 0
+    cc_count_per_rot_d0 = [0] * 10
+    cc_hangers_per_rot_d0 = [0] * 10
+    prev_clr = None
+
+    for r in range(10):
+        colors_ord = []
+        order = jig_orders_d0[r]
+        for g in order:
+            if g in templates_d0[r] and templates_d0[r][g] > 0:
+                grp_colors = get_grp_colors_for_cc(g, r)
+                colors_ord.extend(grp_colors)
+
+        # 회전간 컬러교환
+        if prev_clr and colors_ord and colors_ord[0] != prev_clr:
+            cc_count_per_rot_d0[r] += 1
+            cc_hangers_per_rot_d0[r] += get_cc_cost_local(prev_clr, colors_ord[0])
+
+        # 회전내 컬러교환
+        for i in range(1, len(colors_ord)):
+            if colors_ord[i] != colors_ord[i-1]:
+                cc_count_per_rot_d0[r] += 1
+                cc_hangers_per_rot_d0[r] += get_cc_cost_local(colors_ord[i-1], colors_ord[i])
+
+        cc_count_d0 += cc_count_per_rot_d0[r]
+        cc_hangers_d0 += cc_hangers_per_rot_d0[r]
+
+        if colors_ord:
+            prev_clr = colors_ord[-1]
 
     # D0→D+1 전환 지그교체
     d0_last_tmpl = templates_d0[9]
@@ -1963,6 +2849,205 @@ def schedule(items):
         for r in range(10):
             stk = stk - x['d2'][r] + x['prod2'][r]
         x['cur2'] = stk
+
+    # =============================================
+    # 빈행어 손실 반영: 컬러교환으로 인한 생산량 차감
+    # - 컬러교환 시 빈행어만큼 생산 불가능 (무조건 발생)
+    # - 각 회전에서 빈행어 수만큼 생산량 감소
+    # =============================================
+    for r in range(10):
+        empty_hangers = cc_hangers_per_rot_d0[r]
+        if empty_hangers <= 0:
+            continue
+
+        # 이 회전에서 생산 중인 아이템들 (생산량 많은 것부터 차감)
+        rot_items = [(x, x['prod'][r]) for x in items if x['prod'][r] > 0]
+        rot_items.sort(key=lambda t: -t[1])
+
+        remaining_loss = empty_hangers
+        for x, prod in rot_items:
+            if remaining_loss <= 0:
+                break
+            # 최소 0까지 차감 가능
+            reduce = min(remaining_loss, prod)
+            if reduce > 0:
+                x['prod'][r] -= reduce
+                remaining_loss -= reduce
+
+    # =============================================
+    # D+1 1-2회전 부족 그룹 내 재분배 (빈행어 차감 후)
+    # - D+1-3~5는 D+1 생산으로 커버 가능, D+1-1~2만 D0 책임
+    # =============================================
+    def calc_d1_morning_shortage_post(x):
+        """빈행어 차감 후 D+1 1-2회전까지 부족 수량"""
+        d0_end = x['stk']
+        for r in range(10):
+            d0_end = d0_end - x['d0'][r] + x['prod'][r]
+        stk = d0_end
+        max_shortage = 0
+        for r in range(2):  # D+1-1, D+1-2만
+            stk -= x.get('d1', [0]*10)[r]
+            if stk < 0:
+                max_shortage = max(max_shortage, -stk)
+        return max_shortage
+
+    def calc_d1_morning_excess_post(x):
+        """빈행어 차감 후 D+1 1-2회전까지 여유 수량"""
+        d0_end = x['stk']
+        for r in range(10):
+            d0_end = d0_end - x['d0'][r] + x['prod'][r]
+        stk = d0_end
+        min_stk = d0_end
+        for r in range(2):  # D+1-1, D+1-2만
+            stk -= x.get('d1', [0]*10)[r]
+            min_stk = min(min_stk, stk)
+        return max(0, min_stk)
+
+    # 그룹별로 재분배
+    for g in set(x['grp'] for x in items):
+        grp_items = [x for x in items if x['grp'] == g]
+
+        for iteration in range(50):
+            shortage_items_local = [(x, calc_d1_morning_shortage_post(x)) for x in grp_items]
+            shortage_items_local = [(x, s) for x, s in shortage_items_local if s > 0]
+            if not shortage_items_local:
+                break
+
+            excess_items_local = [(x, calc_d1_morning_excess_post(x)) for x in grp_items]
+            excess_items_local = [(x, e) for x, e in excess_items_local if e > 0 and sum(x['prod']) > 0]
+            if not excess_items_local:
+                break
+
+            shortage_items_local.sort(key=lambda t: -t[1])
+            excess_items_local.sort(key=lambda t: -t[1])
+
+            shortage_x, shortage_amt = shortage_items_local[0]
+            excess_x, excess_amt = excess_items_local[0]
+
+            if shortage_x == excess_x:
+                break
+
+            moved = 0
+            for r in range(9, -1, -1):
+                if moved >= shortage_amt or moved >= excess_amt:
+                    break
+                if excess_x['prod'][r] > 0:
+                    transfer = min(shortage_amt - moved, excess_amt - moved, excess_x['prod'][r])
+                    if transfer > 0:
+                        excess_x['prod'][r] -= transfer
+                        shortage_x['prod'][r] += transfer
+                        moved += transfer
+
+            if moved == 0:
+                break
+
+    # =============================================
+    # 2회전 리드타임 제약 적용
+    # - R회전 생산 → R+2회전부터 사용 가능
+    # - R회전 부족 → R-2회전까지 생산 필요
+    # =============================================
+    LEAD_TIME_POST = 2
+
+    def calc_lead_time_shortage(x):
+        """리드타임 적용 시 각 회전별 부족 계산 (D0 + D+1 1-2회전만)"""
+        stk = x['stk']
+        shortage_by_rot = []
+
+        for r in range(10):  # D0
+            stk -= x['d0'][r]
+            # R-2회전 생산이 사용 가능
+            if r >= LEAD_TIME_POST:
+                stk += x['prod'][r - LEAD_TIME_POST]
+            if stk < 0:
+                shortage_by_rot.append((r, -stk))
+
+        # D+1 1-2회전만 (D+1-3~5는 D+1 생산으로 커버)
+        for r in range(2):
+            stk -= x.get('d1', [0]*10)[r]
+            d0_rot = 8 + r  # D0-9, D0-10 생산이 D+1-1, D+1-2에 사용 가능
+            if d0_rot < 10:
+                stk += x['prod'][d0_rot]
+            if stk < 0:
+                shortage_by_rot.append((10 + r, -stk))
+
+        return shortage_by_rot
+
+    # 리드타임 부족 아이템 찾기 및 생산 앞당기기
+    for g in set(x['grp'] for x in items):
+        grp_items = [x for x in items if x['grp'] == g]
+
+        for iteration in range(30):
+            # 리드타임 부족 있는 아이템 찾기
+            shortage_item = None
+            shortage_rot = None
+            shortage_amt = 0
+            for x in grp_items:
+                shortages = calc_lead_time_shortage(x)
+                if shortages:
+                    shortage_item = x
+                    shortage_rot, shortage_amt = shortages[0]
+                    break
+
+            if not shortage_item:
+                break
+
+            # 같은 그룹 내 다른 아이템에서 앞 회전 생산을 빌려옴
+            # 또는 같은 아이템 내에서 뒤 회전 생산을 앞으로 이동
+            moved = False
+
+            # 필요한 생산 회전 (리드타임 고려, 최대 D0-10까지)
+            need_by_rot = min(9, max(0, shortage_rot - LEAD_TIME_POST))
+
+            # 1) 같은 그룹 다른 아이템에서 앞 회전 생산 빌려오기
+            for other_x in grp_items:
+                if moved:
+                    break
+                if other_x == shortage_item:
+                    continue
+                # 다른 아이템의 여유 계산
+                other_excess = calc_d1_morning_excess_post(other_x)
+                if other_excess <= 0:
+                    continue
+                # 앞 회전(need_by_rot 이하)에서 생산 있는지
+                for src_r in range(min(10, need_by_rot + 1)):
+                    if other_x['prod'][src_r] > 0:
+                        transfer = min(shortage_amt, other_excess, other_x['prod'][src_r])
+                        if transfer > 0:
+                            other_x['prod'][src_r] -= transfer
+                            shortage_item['prod'][src_r] += transfer
+                            moved = True
+                            break
+
+            # 2) 같은 아이템 내에서 뒤 회전 생산을 앞으로 이동 (템플릿 용량 허용 시)
+            if not moved:
+                for src_r in range(9, need_by_rot, -1):
+                    if shortage_item['prod'][src_r] > 0:
+                        # src_r 생산을 need_by_rot으로 이동
+                        transfer = min(shortage_amt, shortage_item['prod'][src_r])
+                        if transfer > 0:
+                            shortage_item['prod'][src_r] -= transfer
+                            shortage_item['prod'][need_by_rot] += transfer
+                            moved = True
+                            break
+
+            if not moved:
+                break
+
+    # D0 기말재고 재계산
+    for x in items:
+        stk = x['stk']
+        for r in range(10):
+            stk = stk - x['d0'][r] + x['prod'][r]
+        x['cur'] = stk
+
+    # color_detail 재계산
+    color_detail_d0 = []
+    for r in range(10):
+        detail = dd(int)
+        for x in items:
+            if x['prod'][r] > 0:
+                detail[x['clr']] += x['prod'][r]
+        color_detail_d0.append(dict(detail))
 
     return {
         'd0': {
@@ -2008,7 +3093,7 @@ def schedule(items):
 # ============================================
 
 def get_rotation_items_detail(items, rotation, prod_key, templates, jig_orders):
-    """회전별 생산 아이템 상세"""
+    """회전별 생산 아이템 상세 - 컬러별로 묶어서 표시"""
     tmpl = templates[rotation]
     order = jig_orders[rotation] if jig_orders and jig_orders[rotation] else sorted(tmpl.keys())
 
@@ -2018,7 +3103,19 @@ def get_rotation_items_detail(items, rotation, prod_key, templates, jig_orders):
             continue
         grp_items = [(x, x[prod_key][rotation]) for x in items
                      if x['grp'] == g and x[prod_key][rotation] > 0]
-        grp_items.sort(key=lambda x: -x[1])
+
+        # 컬러별 생산량 합계 계산
+        color_totals = {}
+        for x, prod in grp_items:
+            clr = x['clr']
+            color_totals[clr] = color_totals.get(clr, 0) + prod
+
+        # 컬러 순서: 생산량 많은 순, 같으면 알파벳 순
+        color_order = sorted(color_totals.keys(), key=lambda c: (-color_totals[c], c))
+        color_rank = {c: i for i, c in enumerate(color_order)}
+
+        # 아이템 정렬: 컬러 순서 → 생산량 순
+        grp_items.sort(key=lambda x: (color_rank.get(x[0]['clr'], 999), -x[1]))
 
         if grp_items:
             for x, prod in grp_items:
@@ -2409,6 +3506,190 @@ def generate_html_report(items, schedule_result):
                 </div>
             </div>
         </div>
+
+        <div class="card">
+            <h2>D0 생산 없을 때 재고부족 현황 (D+1 오전까지)</h2>
+            <p style="color:#666;margin-bottom:15px;">D0에 생산하지 않으면 D+1 오전(5회전)까지 언제 재고부족이 발생하는지 보여줍니다.</p>
+'''
+    # 생산 없을 때 D+1 오전까지 재고부족 계산
+    shortage_items = []
+    rot_shortages = {}  # 회전별 그룹화
+
+    for x in items:
+        stk = x['stk']
+        shortage_rot = -1
+        first_shortage_amt = 0
+
+        # D0 각 회전에서 부족 체크 (생산 0 가정)
+        for r in range(10):
+            stk = stk - x['d0'][r]
+            if stk < 0 and shortage_rot < 0:
+                shortage_rot = r + 1  # D0-1 ~ D0-10
+                first_shortage_amt = -stk
+
+        # D+1 오전 5회전 체크
+        for r in range(5):
+            stk = stk - x['d1'][r]
+            if stk < 0 and shortage_rot < 0:
+                shortage_rot = 10 + r + 1  # D+1-1 ~ D+1-5 (11~15)
+                first_shortage_amt = -stk
+
+        # 최종 부족량 (D+1 오전 끝 시점)
+        final_shortage = -stk if stk < 0 else 0
+
+        if shortage_rot > 0:
+            rot_key = shortage_rot
+            if rot_key not in rot_shortages:
+                rot_shortages[rot_key] = []
+            rot_shortages[rot_key].append({
+                'ct': x['ct'],
+                'it': x['it'],
+                'det': x.get('det', '-'),
+                'clr': x['clr'],
+                'grp': x['grp'],
+                'stk': x['stk'],
+                'd0t': sum(x['d0']),
+                'd1_am': sum(x['d1'][:5]),
+                'rot': shortage_rot,
+                'first_amt': first_shortage_amt,
+                'final_amt': final_shortage
+            })
+            shortage_items.append(rot_shortages[rot_key][-1])
+
+    # 시간대별 요약 테이블
+    html += '''
+            <h3 style="margin-top:0;">시간대별 부족 요약</h3>
+            <table class="jig-table" style="font-size:0.9em;max-width:800px;">
+                <tr>
+                    <th>시간대</th>
+                    <th>부족 시작 아이템 수</th>
+                    <th>부족량 합계</th>
+                    <th>비고</th>
+                </tr>
+'''
+    # D0 주간 (1-5회전)
+    d0_day_items = sum(len(rot_shortages.get(r, [])) for r in range(1, 6))
+    d0_day_amt = sum(s['first_amt'] for r in range(1, 6) for s in rot_shortages.get(r, []))
+    # D0 야간 (6-10회전)
+    d0_night_items = sum(len(rot_shortages.get(r, [])) for r in range(6, 11))
+    d0_night_amt = sum(s['first_amt'] for r in range(6, 11) for s in rot_shortages.get(r, []))
+    # D+1 오전 (1-5회전 = 11-15)
+    d1_am_items = sum(len(rot_shortages.get(r, [])) for r in range(11, 16))
+    d1_am_amt = sum(s['first_amt'] for r in range(11, 16) for s in rot_shortages.get(r, []))
+
+    html += f'''
+                <tr>
+                    <td style="background:#E3F2FD;font-weight:bold;">D0 주간 (1-5회전)</td>
+                    <td>{d0_day_items}건</td>
+                    <td style="color:#D32F2F;font-weight:bold;">{d0_day_amt}개</td>
+                    <td>{'없음' if d0_day_items == 0 else '긴급 생산 필요'}</td>
+                </tr>
+                <tr>
+                    <td style="background:#E8EAF6;font-weight:bold;">D0 야간 (6-10회전)</td>
+                    <td>{d0_night_items}건</td>
+                    <td style="color:#D32F2F;font-weight:bold;">{d0_night_amt}개</td>
+                    <td>{'없음' if d0_night_items == 0 else '주간 선생산 필요'}</td>
+                </tr>
+                <tr>
+                    <td style="background:#FFF3E0;font-weight:bold;">D+1 오전 (1-5회전)</td>
+                    <td>{d1_am_items}건</td>
+                    <td style="color:#E65100;font-weight:bold;">{d1_am_amt}개</td>
+                    <td>{'없음' if d1_am_items == 0 else 'D0 생산으로 커버'}</td>
+                </tr>
+                <tr style="background:#FFEBEE;font-weight:bold;">
+                    <td>합계</td>
+                    <td>{len(shortage_items)}건</td>
+                    <td style="color:#D32F2F;">{d0_day_amt + d0_night_amt + d1_am_amt}개</td>
+                    <td></td>
+                </tr>
+            </table>
+
+            <h3 style="margin-top:25px;">D0 생산 없을 때 3일 재고 전망 (부족 아이템)</h3>
+            <p style="color:#666;font-size:0.85em;">D0 생산이 전혀 없다고 가정할 때 각 회전별 재고 흐름 (부족 발생 아이템만 표시)</p>
+        </div>
+        <div class="card" style="overflow-x:auto;">
+        <table class="jig-table" style="font-size:0.75em;">
+        <thead>
+            <tr>
+                <th rowspan="2">차종</th>
+                <th rowspan="2">아이템</th>
+                <th rowspan="2">세부</th>
+                <th rowspan="2">컬러</th>
+                <th rowspan="2">지그</th>
+                <th rowspan="2">기초</th>'''
+
+    # D0 수요/재고 헤더
+    for i in range(10):
+        html += f'<th colspan="2" style="background:#1976D2;">D0-{i+1}</th>'
+    # D+1 오전 5회전만
+    for i in range(5):
+        html += f'<th colspan="2" style="background:#388E3C;">D+1-{i+1}</th>'
+    html += '<th rowspan="2">최종</th>'
+
+    html += '</tr><tr>'
+    # D0 수요/재고
+    for i in range(10):
+        html += '<th style="background:#1976D2;font-size:0.8em;">수</th>'
+        html += '<th style="background:#1976D2;font-size:0.8em;">재</th>'
+    # D+1 오전
+    for i in range(5):
+        html += '<th style="background:#388E3C;font-size:0.8em;">수</th>'
+        html += '<th style="background:#388E3C;font-size:0.8em;">재</th>'
+    html += '</tr></thead><tbody>'
+
+    # 부족 아이템 정렬 (부족 심한 순)
+    def get_min_stock_no_prod(x):
+        stk = x['stk']
+        min_stk = stk
+        for i in range(10):
+            stk = stk - x['d0'][i]
+            min_stk = min(min_stk, stk)
+        for i in range(5):
+            stk = stk - x['d1'][i]
+            min_stk = min(min_stk, stk)
+        return min_stk
+
+    items_with_shortage = [x for x in items if get_min_stock_no_prod(x) < 0]
+    items_with_shortage.sort(key=get_min_stock_no_prod)
+
+    if items_with_shortage:
+        for x in items_with_shortage:
+            ct = x['ct'].replace('\n', ' ')[:10]
+            it = x['it'].replace('\n', ' ')[:8]
+            det = (x['det'] or '-').replace('\n', ' ')[:6]
+            clr = x['clr'][:5] if x['clr'] else '-'
+            grp = x['grp'] or '-'
+
+            html += f'<tr style="background:#FFF3E0;"><td>{ct}</td><td>{it}</td><td>{det}</td><td>{clr}</td><td>{grp}</td>'
+            html += f'<td>{x["stk"]}</td>'
+
+            # D0 (생산 없음)
+            stk = x['stk']
+            for i in range(10):
+                dem = x['d0'][i]
+                stk = stk - dem
+                stk_style = 'color:#D32F2F;font-weight:bold;background:#FFCDD2;' if stk < 0 else ''
+                html += f'<td>{dem}</td><td style="{stk_style}">{stk}</td>'
+
+            # D+1 오전 5회전 (생산 없음)
+            for i in range(5):
+                dem = x['d1'][i]
+                stk = stk - dem
+                stk_style = 'color:#D32F2F;font-weight:bold;background:#FFCDD2;' if stk < 0 else ''
+                html += f'<td>{dem}</td><td style="{stk_style}">{stk}</td>'
+
+            final_style = 'color:#D32F2F;font-weight:bold;background:#FFCDD2;' if stk < 0 else 'font-weight:bold;'
+            html += f'<td style="{final_style}">{stk}</td></tr>'
+    else:
+        html += '''<tr><td colspan="37" style="color:#4CAF50;font-weight:bold;padding:20px;">
+            생산 없이도 D+1 오전까지 재고부족 없음</td></tr>'''
+
+    html += '''</tbody></table>
+        <p style="color:#888;font-size:0.85em;margin-top:10px;">
+            * D0 생산이 전혀 없다고 가정할 때의 재고 흐름<br/>
+            * 빨간색 셀은 해당 시점에서 재고 부족 발생
+        </p>
+        </div>
 '''
 
     # 재고/수요/생산 합계
@@ -2655,23 +3936,31 @@ def generate_html_report(items, schedule_result):
                 <th rowspan="2">기초</th>
                 <th rowspan="2">D0생산</th>'''
 
-    # D0 수요/재고
+    # D0 수요/생산/재고 (3열)
     for i in range(10):
-        html += f'<th colspan="2" style="background:#1976D2;">D0-{i+1}</th>'
-    # D+1 수요/재고
+        html += f'<th colspan="3" style="background:#1976D2;">D0-{i+1}</th>'
+    # D+1 수요/재고 (2열)
     for i in range(10):
         html += f'<th colspan="2" style="background:#388E3C;">D+1-{i+1}</th>'
-    # D+2 수요/재고
+    # D+2 수요/재고 (2열)
     for i in range(10):
         html += f'<th colspan="2" style="background:#F57C00;">D+2-{i+1}</th>'
     html += '<th rowspan="2">최종</th>'
 
     html += '</tr><tr>'
-    for day in ['D0', 'D+1', 'D+2']:
-        bg = '#1976D2' if day == 'D0' else '#388E3C' if day == 'D+1' else '#F57C00'
-        for i in range(10):
-            html += f'<th style="background:{bg};font-size:0.8em;">수</th>'
-            html += f'<th style="background:{bg};font-size:0.8em;">재</th>'
+    # D0: 수/생/재
+    for i in range(10):
+        html += f'<th style="background:#1976D2;font-size:0.8em;">수</th>'
+        html += f'<th style="background:#1976D2;font-size:0.8em;">생</th>'
+        html += f'<th style="background:#1976D2;font-size:0.8em;">재</th>'
+    # D+1: 수/재
+    for i in range(10):
+        html += f'<th style="background:#388E3C;font-size:0.8em;">수</th>'
+        html += f'<th style="background:#388E3C;font-size:0.8em;">재</th>'
+    # D+2: 수/재
+    for i in range(10):
+        html += f'<th style="background:#F57C00;font-size:0.8em;">수</th>'
+        html += f'<th style="background:#F57C00;font-size:0.8em;">재</th>'
     html += '</tr></thead><tbody>'
 
     # 부족 아이템 먼저 정렬
@@ -2706,13 +3995,16 @@ def generate_html_report(items, schedule_result):
         html += f'<tr style="{row_style}"><td>{ct}</td><td>{it}</td><td>{det}</td><td>{clr}</td><td>{grp}</td>'
         html += f'<td>{x["stk"]}</td><td style="color:#1976D2;font-weight:bold;">{d0_prod_total}</td>'
 
-        # D0 (실제 생산 반영)
+        # D0 (실제 생산 반영) - 수요/생산/재고
         stk = x['stk']
         for i in range(10):
             dem = x['d0'][i]
-            stk = stk - dem + x['prod'][i]
+            prod = x['prod'][i]
+            stk = stk - dem + prod
             stk_style = 'color:#D32F2F;font-weight:bold;background:#FFCDD2;' if stk < 0 else ''
-            html += f'<td>{dem}</td><td style="{stk_style}">{stk}</td>'
+            prod_style = 'color:#1976D2;font-weight:bold;' if prod > 0 else 'color:#ccc;'
+            prod_text = prod if prod > 0 else '-'
+            html += f'<td>{dem}</td><td style="{prod_style}">{prod_text}</td><td style="{stk_style}">{stk}</td>'
 
         # D+1 (D0 생산만, D+1 생산 없음)
         for i in range(10):

@@ -239,8 +239,8 @@ def load_data_from_db(demand_date):
             'prod2': [0] * 10
         })
 
-    # 재고 0인 아이템 제외 (generate_report.py와 동일)
-    items = [x for x in items if x['stk'] > 0]
+    # 수요 있는 아이템만 포함 (재고 0이어도 수요 있으면 생산 필요)
+    items = [x for x in items if x['d0t'] > 0 or x['d1t'] > 0 or x['d2t'] > 0 or x['stk'] > 0]
     return items
 
 # ============================================
