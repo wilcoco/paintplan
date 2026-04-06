@@ -278,23 +278,19 @@ def schedule_mip(items):
             cum_prod = sum(x[i, rr] for rr in range(available_rot + 1)) if available_rot >= 0 else 0
             solver.Add(stk + cum_prod - cum_demand >= 0)
 
-    # 2. D+1 1-2회전 재고 >= 0 (리드타임 적용)
-    # D+1 1회전 = 회전11 → 9회전까지 생산 필요 (11-2=9)
-    # D+1 2회전 = 회전12 → 10회전까지 생산 필요 (12-2=10)
+    # 2. D+1 주간(1-5회전) 재고 >= 0 - 강한 제약
+    # D0 기말재고가 D+1 주간 수요를 모두 커버해야 함
     for i, item in enumerate(items):
         stk = item.get('stk', 0)
         d0_demand = sum(item['d0'])
         d1 = item.get('d1', [0]*10)
+        d0_prod = sum(x[i, r] for r in range(n_rotations))
 
-        # D+1 1회전 수요 충족: D0 9회전까지 생산 (0~8 인덱스)
-        d1_rot1 = d1[0] if len(d1) > 0 else 0
-        prod_by_rot9 = sum(x[i, r] for r in range(9))
-        solver.Add(stk + prod_by_rot9 - d0_demand - d1_rot1 >= 0)
-
-        # D+1 2회전 수요 충족: D0 10회전까지 생산 (전체)
-        d1_rot12 = d1[0] + (d1[1] if len(d1) > 1 else 0)
-        prod_by_rot10 = sum(x[i, r] for r in range(n_rotations))
-        solver.Add(stk + prod_by_rot10 - d0_demand - d1_rot12 >= 0)
+        # D+1 각 회전별 누적 재고 >= 0 (강한 제약)
+        for d1_rot in range(5):  # D+1 1-5회전
+            d1_cum_demand = sum(d1[r] for r in range(d1_rot + 1))
+            # D0 기말재고 - D+1 누적수요 >= 0
+            solver.Add(stk + d0_prod - d0_demand - d1_cum_demand >= 0)
 
     # 3. 그룹별 생산량 <= 행어 × 지그 × pcs
     for g in groups:
