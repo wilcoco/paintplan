@@ -839,14 +839,8 @@ def schedule_mip_2days(items):
             solver.Add(cc[c, r] >= y[c, r] - y[c, r - 1])
             solver.Add(cc[c, r] <= y[c, r])
 
-    # 10. 컬러 연속성 (D0/D+1 각각, D0→D+1 전환 시 제외)
-    for c in colors:
-        # D0 내부 (0-8)
-        for r in range(8):
-            solver.Add(y[c, r] - y[c, r + 1] + y[c, r + 2] <= 1)
-        # D+1 내부 (10-17)
-        for r in range(10, 18):
-            solver.Add(y[c, r] - y[c, r + 1] + y[c, r + 2] <= 1)
+    # 10. 컬러 연속성 - 생략 (목적함수로 CC 최소화, 속도 향상)
+    # 복잡한 제약이므로 2일 모델에서는 제외
 
     # 11. 컬러 종료 추적
     color_end = {}
@@ -872,9 +866,8 @@ def schedule_mip_2days(items):
     for r in range(n_rotations):
         solver.Add(sum(y[c, r] for c in colors) <= MAX_COLORS_PER_ROT)
 
-    # 13. 총 컬러-회전 쌍 제한 (2일이므로 2배)
-    total_color_rotation_pairs = sum(y[c, r] for c in colors for r in range(n_rotations))
-    solver.Add(total_color_rotation_pairs <= 64)
+    # 13. 총 컬러-회전 쌍 제한 - 생략 (속도 향상)
+    # 목적함수에서 CC 최소화로 자연스럽게 제한됨
 
     # ============================================
     # 목적함수
@@ -887,7 +880,7 @@ def schedule_mip_2days(items):
     EMPTY_WEIGHT = 100
     solver.Minimize(CC_WEIGHT * total_color_starts + EMPTY_WEIGHT * empty_hanger_cost - total_production)
 
-    solver.SetTimeLimit(60000)  # 60초 (2일이라 더 오래 걸림)
+    solver.SetTimeLimit(25000)  # 25초 (Railway 타임아웃 방지)
 
     status = solver.Solve()
 
