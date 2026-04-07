@@ -810,16 +810,16 @@ def schedule_mip_2days(items):
             solver.Add(delta[k, r] >= cumsum_prev - cumsum_curr)
 
     # 7. 지그교체 예산 (D0, D+1 각각)
-    # D0 주간 (r=1,2,3,4)
+    # D0 주간 (r=1,2,3,4): 0→1, 1→2, 2→3, 3→4
     day0_day_changes = sum(delta[k, r] for k in range(n_groups - 1) for r in range(1, 5))
     solver.Add(day0_day_changes <= JIG_BUDGET_DAY)
-    # D0 야간 (r=5,6,7,8,9)
+    # D0 야간 (r=5,6,7,8,9): 4→5, 5→6, 6→7, 7→8, 8→9
     day0_night_changes = sum(delta[k, r] for k in range(n_groups - 1) for r in range(5, 10))
     solver.Add(day0_night_changes <= JIG_BUDGET_NIGHT)
-    # D+1 주간 (r=11,12,13,14)
+    # D+1 주간 (r=11,12,13,14): 10→11, 11→12, 12→13, 13→14 (r=10은 새 날 시작, 무료)
     day1_day_changes = sum(delta[k, r] for k in range(n_groups - 1) for r in range(11, 15))
     solver.Add(day1_day_changes <= JIG_BUDGET_DAY)
-    # D+1 야간 (r=15,16,17,18,19)
+    # D+1 야간 (r=15,16,17,18,19): 14→15, 15→16, 16→17, 17→18, 18→19
     day1_night_changes = sum(delta[k, r] for k in range(n_groups - 1) for r in range(15, 20))
     solver.Add(day1_night_changes <= JIG_BUDGET_NIGHT)
 
@@ -842,45 +842,23 @@ def schedule_mip_2days(items):
     # 10. 컬러 연속성 - 생략 (목적함수로 CC 최소화, 속도 향상)
     # 복잡한 제약이므로 2일 모델에서는 제외
 
-    # 11. 컬러 종료 추적
-    color_end = {}
-    for c in colors:
-        for r in range(n_rotations - 1):
-            color_end[c, r] = solver.BoolVar(f'end_{c}_{r}')
-            solver.Add(color_end[c, r] >= y[c, r] - y[c, r + 1])
-            solver.Add(color_end[c, r] <= y[c, r])
+    # 11. 컬러 종료 추적 - 생략 (속도 향상)
+    # 2일 모델에서는 CC만 최소화
 
-    special_color_ends = sum(
-        color_end[c, r]
-        for c in colors if c.upper() in SPECIAL_COLORS
-        for r in range(n_rotations - 1)
-    )
-    normal_color_ends = sum(
-        color_end[c, r]
-        for c in colors if c.upper() not in SPECIAL_COLORS
-        for r in range(n_rotations - 1)
-    )
-
-    # 12. 회전당 컬러 수 제한
-    MAX_COLORS_PER_ROT = 4
-    for r in range(n_rotations):
-        solver.Add(sum(y[c, r] for c in colors) <= MAX_COLORS_PER_ROT)
-
-    # 13. 총 컬러-회전 쌍 제한 - 생략 (속도 향상)
-    # 목적함수에서 CC 최소화로 자연스럽게 제한됨
+    # 12. 회전당 컬러 수 제한 - 생략 (속도 향상)
 
     # ============================================
-    # 목적함수
+    # 목적함수: CC 최소화 + 생산량 최대화
     # ============================================
     total_color_starts = sum(cc[c, r] for c in colors for r in range(n_rotations))
     total_production = sum(x[i, r] for i in range(n_items) for r in range(n_rotations))
-    empty_hanger_cost = 15 * special_color_ends + 1 * normal_color_ends
 
     CC_WEIGHT = 1000
-    EMPTY_WEIGHT = 100
-    solver.Minimize(CC_WEIGHT * total_color_starts + EMPTY_WEIGHT * empty_hanger_cost - total_production)
+    solver.Minimize(CC_WEIGHT * total_color_starts - total_production)
 
-    solver.SetTimeLimit(25000)  # 25초 (Railway 타임아웃 방지)
+    solver.SetTimeLimit(45000)  # 45초
+    # 빠른 해 탐색 우선
+    solver.SetSolverSpecificParametersAsString("limits/gap = 0.1")
 
     status = solver.Solve()
 
