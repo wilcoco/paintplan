@@ -3742,7 +3742,68 @@ def generate_html_report(items, schedule_result):
         html += '''<tr><td colspan="37" style="color:#4CAF50;font-weight:bold;padding:20px;">
             생산 없이도 D+1 오전까지 재고부족 없음</td></tr>'''
 
-    html += '''</tbody></table>
+    # 날짜별 부족 요약 계산 (생산 없을 때)
+    d0_shortage_items = 0
+    d0_shortage_qty = 0
+    d1_morning_shortage_items = 0
+    d1_morning_shortage_qty = 0
+
+    for x in items:
+        stk = x['stk']
+        had_d0_shortage = False
+        had_d1_shortage = False
+        d0_min = stk
+        d1_min = stk
+
+        # D0 부족 체크
+        for i in range(10):
+            stk = stk - x['d0'][i]
+            if stk < 0:
+                had_d0_shortage = True
+                d0_min = min(d0_min, stk)
+
+        # D+1 오전 부족 체크
+        for i in range(5):
+            stk = stk - x['d1'][i]
+            if stk < 0:
+                had_d1_shortage = True
+                d1_min = min(d1_min, stk)
+
+        if had_d0_shortage:
+            d0_shortage_items += 1
+            d0_shortage_qty += abs(d0_min)
+        if had_d1_shortage and not had_d0_shortage:
+            d1_morning_shortage_items += 1
+            d1_morning_shortage_qty += abs(d1_min)
+        elif had_d1_shortage:
+            # D0에서 이미 부족했던 아이템도 D+1 부족에 추가
+            d1_morning_shortage_items += 1
+            d1_morning_shortage_qty += abs(d1_min) - abs(d0_min) if d1_min < d0_min else 0
+
+    total_shortage_items = len(items_with_shortage)
+    total_shortage_qty = d0_shortage_qty + d1_morning_shortage_qty
+
+    html += f'''</tbody></table>
+        <div style="margin-top:15px;padding:15px;background:#FFEBEE;border-radius:8px;border-left:4px solid #D32F2F;">
+            <h4 style="margin:0 0 10px 0;color:#C62828;">부족 요약 (생산 없을 때)</h4>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:15px;text-align:center;">
+                <div style="background:white;padding:10px;border-radius:6px;">
+                    <div style="font-size:0.85em;color:#666;">D0 부족</div>
+                    <div style="font-size:1.3em;font-weight:bold;color:#D32F2F;">{d0_shortage_items}개 아이템</div>
+                    <div style="font-size:0.9em;color:#666;">총 {d0_shortage_qty:,}개 부족</div>
+                </div>
+                <div style="background:white;padding:10px;border-radius:6px;">
+                    <div style="font-size:0.85em;color:#666;">D+1 오전 부족</div>
+                    <div style="font-size:1.3em;font-weight:bold;color:#D32F2F;">{d1_morning_shortage_items}개 아이템</div>
+                    <div style="font-size:0.9em;color:#666;">총 {d1_morning_shortage_qty:,}개 부족</div>
+                </div>
+                <div style="background:white;padding:10px;border-radius:6px;border:2px solid #D32F2F;">
+                    <div style="font-size:0.85em;color:#666;">종합</div>
+                    <div style="font-size:1.3em;font-weight:bold;color:#C62828;">{total_shortage_items}개 아이템</div>
+                    <div style="font-size:0.9em;color:#666;">총 {total_shortage_qty:,}개 부족</div>
+                </div>
+            </div>
+        </div>
         <p style="color:#888;font-size:0.85em;margin-top:10px;">
             * D0 생산이 전혀 없다고 가정할 때의 재고 흐름<br/>
             * 빨간색 셀은 해당 시점에서 재고 부족 발생
@@ -4094,7 +4155,84 @@ def generate_html_report(items, schedule_result):
         final_style = 'color:#D32F2F;font-weight:bold;background:#FFCDD2;' if stk < 0 else 'font-weight:bold;'
         html += f'<td style="{final_style}">{stk}</td></tr>'
 
-    html += '</tbody></table></div>'
+    # 날짜별 부족 요약 계산 (D0 생산만)
+    d0_prod_shortage_items = 0
+    d0_prod_shortage_qty = 0
+    d1_prod_shortage_items = 0
+    d1_prod_shortage_qty = 0
+    d2_prod_shortage_items = 0
+    d2_prod_shortage_qty = 0
+
+    for x in items:
+        stk = x['stk']
+        d0_min = float('inf')
+        d1_min = float('inf')
+        d2_min = float('inf')
+        had_d0_shortage = False
+        had_d1_shortage = False
+        had_d2_shortage = False
+
+        # D0 재고 계산 (생산 반영)
+        for i in range(10):
+            stk = stk - x['d0'][i] + x['prod'][i]
+            if stk < 0:
+                had_d0_shortage = True
+                d0_min = min(d0_min, stk)
+
+        # D+1 재고 계산 (생산 없음)
+        for i in range(10):
+            stk = stk - x['d1'][i]
+            if stk < 0:
+                had_d1_shortage = True
+                d1_min = min(d1_min, stk)
+
+        # D+2 재고 계산 (생산 없음)
+        for i in range(10):
+            stk = stk - x['d2'][i]
+            if stk < 0:
+                had_d2_shortage = True
+                d2_min = min(d2_min, stk)
+
+        if had_d0_shortage:
+            d0_prod_shortage_items += 1
+            d0_prod_shortage_qty += abs(int(d0_min))
+        if had_d1_shortage:
+            d1_prod_shortage_items += 1
+            d1_prod_shortage_qty += abs(int(d1_min))
+        if had_d2_shortage:
+            d2_prod_shortage_items += 1
+            d2_prod_shortage_qty += abs(int(d2_min))
+
+    total_prod_shortage_items = len([x for x in items if get_min_stock_d0_only(x) < 0])
+    total_prod_shortage_qty = d0_prod_shortage_qty + d1_prod_shortage_qty + d2_prod_shortage_qty
+
+    html += f'''</tbody></table>
+        <div style="margin-top:15px;padding:15px;background:#E3F2FD;border-radius:8px;border-left:4px solid #1976D2;">
+            <h4 style="margin:0 0 10px 0;color:#1565C0;">부족 요약 (D0 생산만 반영)</h4>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:15px;text-align:center;">
+                <div style="background:white;padding:10px;border-radius:6px;">
+                    <div style="font-size:0.85em;color:#666;">D0 부족</div>
+                    <div style="font-size:1.3em;font-weight:bold;color:{'#D32F2F' if d0_prod_shortage_items > 0 else '#4CAF50'};">{d0_prod_shortage_items}개 아이템</div>
+                    <div style="font-size:0.9em;color:#666;">총 {d0_prod_shortage_qty:,}개 부족</div>
+                </div>
+                <div style="background:white;padding:10px;border-radius:6px;">
+                    <div style="font-size:0.85em;color:#666;">D+1 부족</div>
+                    <div style="font-size:1.3em;font-weight:bold;color:{'#D32F2F' if d1_prod_shortage_items > 0 else '#4CAF50'};">{d1_prod_shortage_items}개 아이템</div>
+                    <div style="font-size:0.9em;color:#666;">총 {d1_prod_shortage_qty:,}개 부족</div>
+                </div>
+                <div style="background:white;padding:10px;border-radius:6px;">
+                    <div style="font-size:0.85em;color:#666;">D+2 부족</div>
+                    <div style="font-size:1.3em;font-weight:bold;color:{'#D32F2F' if d2_prod_shortage_items > 0 else '#4CAF50'};">{d2_prod_shortage_items}개 아이템</div>
+                    <div style="font-size:0.9em;color:#666;">총 {d2_prod_shortage_qty:,}개 부족</div>
+                </div>
+                <div style="background:white;padding:10px;border-radius:6px;border:2px solid #1976D2;">
+                    <div style="font-size:0.85em;color:#666;">종합</div>
+                    <div style="font-size:1.3em;font-weight:bold;color:{'#D32F2F' if total_prod_shortage_items > 0 else '#4CAF50'};">{total_prod_shortage_items}개 아이템</div>
+                    <div style="font-size:0.9em;color:#666;">총 {total_prod_shortage_qty:,}개 부족</div>
+                </div>
+            </div>
+        </div>
+    </div>'''
 
     # =============================================
     # 오늘 생산 없을 때 재고 부족량 테이블
