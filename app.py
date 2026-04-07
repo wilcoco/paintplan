@@ -448,6 +448,28 @@ def api_upload_demand():
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/demand/dates', methods=['GET'])
+def api_get_demand_dates():
+    """저장된 수요 날짜 목록 조회"""
+    # DailyDemand에서 고유 날짜 목록 조회 (최신순)
+    dates = db.session.query(DailyDemand.demand_date).distinct().order_by(DailyDemand.demand_date.desc()).all()
+
+    result = []
+    for (d,) in dates:
+        # 각 날짜별 아이템 수와 총 수요량 계산
+        stats = db.session.query(
+            db.func.count(db.func.distinct(DailyDemand.item_id)),
+            db.func.sum(DailyDemand.quantity)
+        ).filter(DailyDemand.demand_date == d).first()
+
+        result.append({
+            'date': d.strftime('%Y-%m-%d'),
+            'item_count': stats[0] or 0,
+            'total_demand': stats[1] or 0
+        })
+
+    return jsonify(result)
+
 @app.route('/api/demand', methods=['GET'])
 def api_get_demand():
     """수요 데이터 조회 (D0, D+1, D+2 전체)"""

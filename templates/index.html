@@ -54,21 +54,45 @@
 
             <!-- 수요 탭 -->
             <div class="tab-pane fade" id="demand">
-                <h5 class="mt-3">수요 데이터 업로드</h5>
-                <div class="row mb-3">
-                    <div class="col-md-3">
-                        <label class="form-label">기준일자</label>
-                        <input type="date" class="form-control" id="demandDate">
+                <div class="row">
+                    <!-- 저장된 날짜 선택 -->
+                    <div class="col-md-4">
+                        <div class="card mb-3">
+                            <div class="card-header bg-success text-white">
+                                <strong>저장된 데이터</strong>
+                            </div>
+                            <div class="card-body">
+                                <select class="form-select mb-2" id="savedDates" onchange="selectSavedDate()">
+                                    <option value="">날짜 선택...</option>
+                                </select>
+                                <button class="btn btn-success btn-sm" onclick="loadSavedDates()">새로고침</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 새 데이터 업로드 -->
+                    <div class="col-md-8">
+                        <div class="card mb-3">
+                            <div class="card-header bg-primary text-white">
+                                <strong>새 데이터 업로드</strong>
+                            </div>
+                            <div class="card-body">
+                                <div class="row mb-3">
+                                    <div class="col-md-4">
+                                        <label class="form-label">기준일자</label>
+                                        <input type="date" class="form-control" id="demandDate">
+                                    </div>
+                                </div>
+                                <div class="upload-area" id="uploadArea">
+                                    <h6>엑셀 파일을 드래그하거나 클릭하여 업로드</h6>
+                                    <p class="text-muted small mb-0">paint2.xlsx 형식</p>
+                                    <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none;">
+                                </div>
+                                <div id="uploadResult" class="alert" style="display:none;"></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
-
-                <div class="upload-area" id="uploadArea">
-                    <h6>엑셀 파일을 드래그하거나 클릭하여 업로드</h6>
-                    <p class="text-muted small mb-0">paint2.xlsx 형식</p>
-                    <input type="file" id="fileInput" accept=".xlsx,.xls" style="display:none;">
-                </div>
-
-                <div id="uploadResult" class="alert" style="display:none;"></div>
 
                 <hr>
 
@@ -161,6 +185,7 @@
 
         loadConfig();
         loadJigGroups();
+        loadSavedDates();
 
         async function loadConfig() {
             const r = await fetch('/api/config');
@@ -247,6 +272,36 @@
             } catch(e) {
                 resultDiv.className = 'alert alert-danger';
                 resultDiv.textContent = '업로드 실패: ' + e.message;
+            }
+            // 업로드 후 저장된 날짜 새로고침
+            loadSavedDates();
+        }
+
+        // 저장된 날짜 목록 로드
+        async function loadSavedDates() {
+            try {
+                const r = await fetch('/api/demand/dates');
+                const dates = await r.json();
+                const select = document.getElementById('savedDates');
+                select.innerHTML = '<option value="">날짜 선택...</option>';
+                dates.forEach(d => {
+                    const opt = document.createElement('option');
+                    opt.value = d.date;
+                    opt.textContent = `${d.date} (${d.item_count}개 아이템, ${d.total_demand.toLocaleString()}개 수요)`;
+                    select.appendChild(opt);
+                });
+            } catch(e) {
+                console.error('저장된 날짜 로드 실패:', e);
+            }
+        }
+
+        // 저장된 날짜 선택 시 해당 날짜로 설정
+        function selectSavedDate() {
+            const selected = document.getElementById('savedDates').value;
+            if (selected) {
+                document.getElementById('demandDate').value = selected;
+                document.getElementById('scheduleDate').value = selected;
+                loadDemand();
             }
         }
 
