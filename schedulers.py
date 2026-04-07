@@ -661,6 +661,332 @@ def schedule_mip(items):
 
 
 # ============================================
+# 2-1. MIP 2일 최적화 (D0 + D+1)
+# ============================================
+def schedule_mip_2days(items):
+    """MIP(혼합정수계획법)를 사용한 2일 스케줄링 (D0 + D+1)
+
+    목적함수: 컬러교환 최소화
+    제약조건 (D0, D+1 모두 동일):
+    - 재고 >= 0 (모든 회전)
+    - D+2 주간(1-5회전) 재고 >= 0
+    - 용량 제약 (그룹별/회전별)
+    - 지그교체 예산 (주간/야간 각 150행어)
+    """
+    if not items:
+        return {'error': '스케줄링할 아이템이 없습니다.'}
+
+    try:
+        from ortools.linear_solver import pywraplp
+    except ImportError as e:
+        return {'error': f'OR-Tools 임포트 실패: {e}'}
+    except Exception as e:
+        return {'error': f'OR-Tools 로드 오류: {e}'}
+
+    solver = pywraplp.Solver.CreateSolver('SCIP')
+    if not solver:
+        solver = pywraplp.Solver.CreateSolver('CBC')
+    if not solver:
+        return {'error': 'MIP 솔버(SCIP/CBC)를 생성할 수 없습니다.'}
+
+    n_items = len(items)
+    n_rotations = ROTATIONS * 2  # 20 rotations (D0: 0-9, D+1: 10-19)
+    JIG_BUDGET_DAY = 150
+    JIG_BUDGET_NIGHT = 150
+    MAX_PER_ROTATION = HANGERS * JIGS_PER_HANGER  # 280
+    BIG_M = 1000
+
+    # 그룹별, 컬러별 아이템 인덱스
+    grp_items = defaultdict(list)
+    color_items = defaultdict(list)
+    colors = set()
+    for i, item in enumerate(items):
+        if item.get('grp'):
+            grp_items[item['grp']].append(i)
+        if item.get('clr'):
+            color_items[item['clr']].append(i)
+            colors.add(item['clr'])
+
+    groups = list(JIG_INVENTORY.keys())
+    colors = list(colors)
+
+    # ============================================
+    # 결정변수
+    # ============================================
+    # x[i,r] = 아이템 i를 회전 r에 생산하는 양 (r: 0-19)
+    x = {}
+    for i in range(n_items):
+        for r in range(n_rotations):
+            x[i, r] = solver.IntVar(0, 500, f'x_{i}_{r}')
+
+    # h[g,r] = 그룹 g가 회전 r에 사용하는 행어 수
+    h = {}
+    for g in groups:
+        max_hangers = JIG_INVENTORY[g]['max_jigs'] // JIGS_PER_HANGER
+        for r in range(n_rotations):
+            h[g, r] = solver.IntVar(0, max_hangers, f'h_{g}_{r}')
+
+    # 위치 기반 지그교체 모델링
+    ordered_groups = ['A', 'B', 'B2', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
+    n_groups = len(ordered_groups)
+
+    delta = {}
+    for k in range(n_groups - 1):
+        for r in range(1, n_rotations):
+            delta[k, r] = solver.IntVar(0, HANGERS, f'delta_{k}_{r}')
+
+    # y[c,r] = 1 if color c is used in rotation r
+    y = {}
+    for c in colors:
+        for r in range(n_rotations):
+            y[c, r] = solver.BoolVar(f'y_{c}_{r}')
+
+    # cc[c,r] = 1 if color c starts in rotation r
+    cc = {}
+    for c in colors:
+        for r in range(n_rotations):
+            cc[c, r] = solver.BoolVar(f'cc_{c}_{r}')
+
+    # ============================================
+    # 제약조건
+    # ============================================
+
+    # 1. 재고 >= 0 (각 회전 후) - 2회전 리드타임 적용
+    LEAD_TIME = 2
+    for i, item in enumerate(items):
+        stk = item.get('stk', 0)
+        d0 = item.get('d0', [0]*10)
+        d1 = item.get('d1', [0]*10)
+
+        for r in range(n_rotations):
+            # r회전까지의 수요 (D0: 0-9, D+1: 10-19)
+            if r < 10:
+                cum_demand = sum(d0[rr] for rr in range(r + 1))
+            else:
+                cum_demand = sum(d0) + sum(d1[rr] for rr in range(r - 10 + 1))
+
+            # r-2회전까지의 생산만 사용 가능 (리드타임)
+            available_rot = r - LEAD_TIME
+            cum_prod = sum(x[i, rr] for rr in range(available_rot + 1)) if available_rot >= 0 else 0
+            solver.Add(stk + cum_prod - cum_demand >= 0)
+
+    # 2. D+2 주간(1-5회전) 재고 >= 0
+    for i, item in enumerate(items):
+        stk = item.get('stk', 0)
+        d0_demand = sum(item.get('d0', [0]*10))
+        d1_demand = sum(item.get('d1', [0]*10))
+        d2 = item.get('d2', [0]*10)
+
+        total_prod = sum(x[i, r] for r in range(n_rotations))
+
+        # D+2 각 회전별 누적 재고 >= 0
+        for d2_rot in range(5):
+            d2_cum_demand = sum(d2[r] for r in range(d2_rot + 1))
+            solver.Add(stk + total_prod - d0_demand - d1_demand - d2_cum_demand >= 0)
+
+    # 3. 그룹별 생산량 <= 행어 × 지그 × pcs
+    for g in groups:
+        if g not in grp_items or not grp_items[g]:
+            continue
+        pcs = JIG_INVENTORY[g]['pcs']
+        for r in range(n_rotations):
+            grp_prod = sum(x[i, r] for i in grp_items[g])
+            solver.Add(grp_prod <= h[g, r] * JIGS_PER_HANGER * pcs)
+
+    # 4. 회전당 총 행어 = 140
+    for r in range(n_rotations):
+        solver.Add(sum(h[g, r] for g in groups) == HANGERS)
+
+    # 5. 회전당 총 생산량 상한
+    for r in range(n_rotations):
+        solver.Add(sum(x[i, r] for i in range(n_items)) <= MAX_PER_ROTATION * 2)
+
+    # 6. 위치 기반 지그 변화량
+    for k in range(n_groups - 1):
+        for r in range(1, n_rotations):
+            cumsum_curr = sum(h[ordered_groups[i], r] for i in range(k + 1))
+            cumsum_prev = sum(h[ordered_groups[i], r - 1] for i in range(k + 1))
+            solver.Add(delta[k, r] >= cumsum_curr - cumsum_prev)
+            solver.Add(delta[k, r] >= cumsum_prev - cumsum_curr)
+
+    # 7. 지그교체 예산 (D0, D+1 각각)
+    # D0 주간 (r=1,2,3,4)
+    day0_day_changes = sum(delta[k, r] for k in range(n_groups - 1) for r in range(1, 5))
+    solver.Add(day0_day_changes <= JIG_BUDGET_DAY)
+    # D0 야간 (r=5,6,7,8,9)
+    day0_night_changes = sum(delta[k, r] for k in range(n_groups - 1) for r in range(5, 10))
+    solver.Add(day0_night_changes <= JIG_BUDGET_NIGHT)
+    # D+1 주간 (r=11,12,13,14)
+    day1_day_changes = sum(delta[k, r] for k in range(n_groups - 1) for r in range(11, 15))
+    solver.Add(day1_day_changes <= JIG_BUDGET_DAY)
+    # D+1 야간 (r=15,16,17,18,19)
+    day1_night_changes = sum(delta[k, r] for k in range(n_groups - 1) for r in range(15, 20))
+    solver.Add(day1_night_changes <= JIG_BUDGET_NIGHT)
+
+    # 8. 컬러 사용 여부
+    for c in colors:
+        if c not in color_items:
+            continue
+        for r in range(n_rotations):
+            color_prod = sum(x[i, r] for i in color_items[c])
+            solver.Add(color_prod <= BIG_M * y[c, r])
+
+    # 9. 컬러 교환 감지
+    for c in colors:
+        solver.Add(cc[c, 0] >= y[c, 0])
+        solver.Add(cc[c, 0] <= y[c, 0])
+        for r in range(1, n_rotations):
+            solver.Add(cc[c, r] >= y[c, r] - y[c, r - 1])
+            solver.Add(cc[c, r] <= y[c, r])
+
+    # 10. 컬러 연속성 (D0/D+1 각각, D0→D+1 전환 시 제외)
+    for c in colors:
+        # D0 내부 (0-8)
+        for r in range(8):
+            solver.Add(y[c, r] - y[c, r + 1] + y[c, r + 2] <= 1)
+        # D+1 내부 (10-17)
+        for r in range(10, 18):
+            solver.Add(y[c, r] - y[c, r + 1] + y[c, r + 2] <= 1)
+
+    # 11. 컬러 종료 추적
+    color_end = {}
+    for c in colors:
+        for r in range(n_rotations - 1):
+            color_end[c, r] = solver.BoolVar(f'end_{c}_{r}')
+            solver.Add(color_end[c, r] >= y[c, r] - y[c, r + 1])
+            solver.Add(color_end[c, r] <= y[c, r])
+
+    special_color_ends = sum(
+        color_end[c, r]
+        for c in colors if c.upper() in SPECIAL_COLORS
+        for r in range(n_rotations - 1)
+    )
+    normal_color_ends = sum(
+        color_end[c, r]
+        for c in colors if c.upper() not in SPECIAL_COLORS
+        for r in range(n_rotations - 1)
+    )
+
+    # 12. 회전당 컬러 수 제한
+    MAX_COLORS_PER_ROT = 4
+    for r in range(n_rotations):
+        solver.Add(sum(y[c, r] for c in colors) <= MAX_COLORS_PER_ROT)
+
+    # 13. 총 컬러-회전 쌍 제한 (2일이므로 2배)
+    total_color_rotation_pairs = sum(y[c, r] for c in colors for r in range(n_rotations))
+    solver.Add(total_color_rotation_pairs <= 64)
+
+    # ============================================
+    # 목적함수
+    # ============================================
+    total_color_starts = sum(cc[c, r] for c in colors for r in range(n_rotations))
+    total_production = sum(x[i, r] for i in range(n_items) for r in range(n_rotations))
+    empty_hanger_cost = 15 * special_color_ends + 1 * normal_color_ends
+
+    CC_WEIGHT = 1000
+    EMPTY_WEIGHT = 100
+    solver.Minimize(CC_WEIGHT * total_color_starts + EMPTY_WEIGHT * empty_hanger_cost - total_production)
+
+    solver.SetTimeLimit(60000)  # 60초 (2일이라 더 오래 걸림)
+
+    status = solver.Solve()
+
+    if status not in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
+        return {'error': f'최적해를 찾을 수 없습니다. 상태: {status}'}
+
+    # 결과 추출
+    for i, item in enumerate(items):
+        item['prod'] = [int(x[i, r].solution_value()) for r in range(10)]  # D0
+        item['prod1'] = [int(x[i, r].solution_value()) for r in range(10, 20)]  # D+1
+
+    # D0 지그교체 계산
+    jig_changes_d0 = [0] * 10
+    prev_positions = None
+    templates_d0 = []
+    jig_orders_d0 = []
+    rotation_colors_d0 = []
+
+    for r in range(10):
+        template = {g: int(h[g, r].solution_value()) for g in groups}
+        templates_d0.append(template)
+        active_order = [g for g in ordered_groups if template.get(g, 0) > 0]
+        jig_orders_d0.append(active_order)
+        curr_positions = order_to_positions(template, active_order)
+        if prev_positions:
+            jig_changes_d0[r] = calc_position_changes(prev_positions, curr_positions)
+        prev_positions = curr_positions
+        rot_colors = []
+        for i, item in enumerate(items):
+            if item['prod'][r] > 0 and item.get('clr'):
+                if item['clr'] not in rot_colors:
+                    rot_colors.append(item['clr'])
+        rotation_colors_d0.append(rot_colors)
+
+    # D+1 지그교체 계산
+    jig_changes_d1 = [0] * 10
+    templates_d1 = []
+    jig_orders_d1 = []
+    rotation_colors_d1 = []
+
+    for r in range(10, 20):
+        template = {g: int(h[g, r].solution_value()) for g in groups}
+        templates_d1.append(template)
+        active_order = [g for g in ordered_groups if template.get(g, 0) > 0]
+        jig_orders_d1.append(active_order)
+        curr_positions = order_to_positions(template, active_order)
+        if prev_positions:
+            jig_changes_d1[r - 10] = calc_position_changes(prev_positions, curr_positions)
+        prev_positions = curr_positions
+        rot_colors = []
+        for i, item in enumerate(items):
+            if item['prod1'][r - 10] > 0 and item.get('clr'):
+                if item['clr'] not in rot_colors:
+                    rot_colors.append(item['clr'])
+        rotation_colors_d1.append(rot_colors)
+
+    # D0 손실 계산
+    losses_d0 = calculate_all_losses(items, 'prod')
+    # D+1 손실 계산
+    losses_d1 = calculate_all_losses(items, 'prod1')
+
+    gross_d0 = sum(sum(item['prod']) for item in items)
+    net_d0 = gross_d0 - losses_d0['total_loss']
+    gross_d1 = sum(sum(item['prod1']) for item in items)
+    net_d1 = gross_d1 - losses_d1['total_loss']
+
+    return {
+        'algorithm': 'MIP_2days',
+        'd0': {
+            'color_changes': losses_d0['cc_count'],
+            'cc_count': losses_d0['cc_count'],
+            'empty_hangers': losses_d0['empty_hangers'],
+            'cc_hangers': losses_d0['empty_hangers'],
+            'odd_jig_loss': losses_d0['odd_jig_loss'],
+            'jig_changes': jig_changes_d0,
+            'gross_production': gross_d0,
+            'total_production': net_d0,
+            'templates': templates_d0,
+            'colors': rotation_colors_d0,
+            'jig_orders': jig_orders_d0
+        },
+        'd1': {
+            'color_changes': losses_d1['cc_count'],
+            'cc_count': losses_d1['cc_count'],
+            'empty_hangers': losses_d1['empty_hangers'],
+            'cc_hangers': losses_d1['empty_hangers'],
+            'odd_jig_loss': losses_d1['odd_jig_loss'],
+            'jig_changes': jig_changes_d1,
+            'gross_production': gross_d1,
+            'total_production': net_d1,
+            'templates': templates_d1,
+            'colors': rotation_colors_d1,
+            'jig_orders': jig_orders_d1
+        },
+        'd2': {'templates': [{}]*10, 'colors': [[]]*10, 'jig_changes': [0]*10, 'jig_orders': [None]*10, 'odd_jig_loss': 0}
+    }
+
+
+# ============================================
 # 3. 컬러 중심 (Color-First) - 지그예산 제약 포함
 # ============================================
 def schedule_color_first(items):
@@ -1143,6 +1469,22 @@ def run_scheduler(items, algorithm='heuristic'):
         if 'error' not in result:
             calculate_ending_inventory(items)
         return result
+
+    elif algorithm == 'mip_2days':
+        try:
+            result = schedule_mip_2days(items)
+            if result is None:
+                return {'error': 'MIP_2days가 None을 반환했습니다'}
+            if not isinstance(result, dict):
+                return {'error': f'MIP_2days가 dict가 아닌 값을 반환: {type(result)}'}
+            if 'error' not in result and 'd0' not in result:
+                return {'error': f'MIP_2days 결과에 error도 d0도 없음: {list(result.keys())}'}
+            if 'error' not in result:
+                calculate_ending_inventory(items)
+            return result
+        except Exception as e:
+            import traceback
+            return {'error': f'MIP_2days 실행 오류: {e}', 'traceback': traceback.format_exc()[:500]}
 
     else:
         return {'error': f'Unknown algorithm: {algorithm}'}
