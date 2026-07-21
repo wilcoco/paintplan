@@ -174,6 +174,39 @@
 
                 <div class="row mb-3">
                     <div class="col-12">
+                        <div class="card border-dark">
+                            <div class="card-header bg-dark text-white">
+                                <strong>🧩 제약/개선방향 입력 (자연어 → MIP 제약)</strong>
+                                <span class="small text-light ms-2">「2. MIP 최적화」 실행 시에만 적용됩니다</span>
+                            </div>
+                            <div class="card-body">
+                                <div class="mb-2">
+                                    <textarea class="form-control" id="constraintInput" rows="2"
+                                        placeholder="예) 특수컬러는 야간(6~10회전)에만 배치해줘 / A그룹과 H그룹은 같은 회전에 같이 쓰지 마라"></textarea>
+                                </div>
+                                <button class="btn btn-dark btn-sm" id="btnTranslate" onclick="translateConstraint()">제약 생성 (미리보기)</button>
+                                <span id="constraintStatus" class="ms-2 small"></span>
+
+                                <!-- 생성코드 미리보기 + 승인 -->
+                                <div id="constraintPreview" class="mt-3" style="display:none;">
+                                    <label class="form-label small mb-1"><strong>생성된 제약 코드 (승인 후 적용)</strong></label>
+                                    <pre class="bg-light border p-2 small" style="max-height:240px;overflow:auto;"><code id="constraintCode"></code></pre>
+                                    <div id="feasibilityMsg" class="small mb-2"></div>
+                                    <button class="btn btn-success btn-sm" id="btnApprove" onclick="approveConstraint()">✓ 승인 &amp; 저장</button>
+                                    <button class="btn btn-outline-secondary btn-sm" onclick="cancelConstraint()">취소</button>
+                                </div>
+
+                                <!-- 저장된 제약 목록 -->
+                                <hr>
+                                <label class="form-label small mb-1"><strong>적용 중인 제약</strong></label>
+                                <div id="constraintList" class="small text-muted">불러오는 중...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="row mb-3">
+                    <div class="col-12">
                         <button class="btn btn-outline-secondary" onclick="viewReport()">HTML 리포트 보기</button>
                     </div>
                 </div>
@@ -418,6 +451,8 @@
                         <p class="mb-1"><strong>야간 지그교체:</strong> ${nightJig} / 150</p>
                         <p class="mb-1"><strong>D0 총생산:</strong> ${gross}개</p>
                         <p class="mb-0"><strong>D0 순생산:</strong> ${net}개 <small class="text-muted">(총생산 - 빈행어손실)</small></p>
+                        ${(data.custom_applied && data.custom_applied.length) ? `<hr class="my-2"><p class="mb-0"><strong>적용된 커스텀 제약:</strong> ${data.custom_applied.join(' · ')}</p>` : ''}
+                        ${(data.custom_errors && data.custom_errors.length) ? `<p class="mb-0 text-danger"><strong>제약 오류:</strong> ${data.custom_errors.join(' · ')}</p>` : ''}
                     </div>`;
             } catch(e) {
                 document.getElementById('scheduleLoading').style.display = 'none';
@@ -432,6 +467,125 @@
             if (!date) { alert('기준일자를 선택하세요.'); return; }
             window.open('/api/report?date=' + date + '&algorithm=' + lastAlgorithm, '_blank');
         }
+
+        // ============================================
+        // 커스텀 제약 (자연어 → 코드, C 방식)
+        // ============================================
+        let pendingConstraint = null;  // {text, code} 승인 대기 중
+
+        async function translateConstraint() {
+            const text = document.getElementById('constraintInput').value.trim();
+            if (!text) { alert('제약/개선방향을 입력하세요.'); return; }
+            const date = document.getElementById('scheduleDate').value;  // 실행가능성 테스트용(선택)
+
+            const btn = document.getElementById('btnTranslate');
+            const status = document.getElementById('constraintStatus');
+            btn.disabled = true;
+            status.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 번역 중...';
+            document.getElementById('constraintPreview').style.display = 'none';
+
+            try {
+                const r = await fetch('/api/constraints/translate', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({text, date})
+                });
+                const data = await r.json();
+                btn.disabled = false;
+
+                if (data.error && !data.code) {
+                    status.innerHTML = `<span class="text-danger">${data.error}</span>`;
+                    return;
+                }
+
+                document.getElementById('constraintCode').textContent = data.code;
+                document.getElementById('constraintPreview').style.display = 'block';
+
+                const fmsg = document.getElementById('feasibilityMsg');
+                if (!data.valid) {
+                    status.innerHTML = `<span class="text-danger">⚠ 안전성 검증 실패 — 저장 불가</span>`;
+                    fmsg.innerHTML = `<span class="text-danger">${data.error || ''}</span>`;
+                    document.getElementById('btnApprove').disabled = true;
+                    pendingConstraint = null;
+                    return;
+                }
+
+                status.innerHTML = `<span class="text-success">✓ 검증 통과 — 코드 확인 후 승인하세요</span>`;
+                document.getElementById('btnApprove').disabled = false;
+                if (data.feasible === true) {
+                    fmsg.innerHTML = `<span class="text-success">✓ ${data.feasible_msg}</span>`;
+                } else if (data.feasible === false) {
+                    fmsg.innerHTML = `<span class="text-danger">⚠ 실행불가: ${data.feasible_msg} — 승인 시 다른 제약과 충돌할 수 있습니다</span>`;
+                } else {
+                    fmsg.innerHTML = `<span class="text-muted">${data.feasible_msg || '실행가능성 미검증 (기준일자 선택 시 테스트)'}</span>`;
+                }
+                pendingConstraint = {text, code: data.code};
+            } catch(e) {
+                btn.disabled = false;
+                status.innerHTML = `<span class="text-danger">오류: ${e}</span>`;
+            }
+        }
+
+        async function approveConstraint() {
+            if (!pendingConstraint) return;
+            try {
+                const r = await fetch('/api/constraints', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(pendingConstraint)
+                });
+                const data = await r.json();
+                if (data.error) { alert(data.error); return; }
+                cancelConstraint();
+                document.getElementById('constraintInput').value = '';
+                document.getElementById('constraintStatus').innerHTML = '<span class="text-success">✓ 저장됨 (MIP 실행 시 적용)</span>';
+                loadConstraints();
+            } catch(e) { alert('저장 오류: ' + e); }
+        }
+
+        function cancelConstraint() {
+            pendingConstraint = null;
+            document.getElementById('constraintPreview').style.display = 'none';
+        }
+
+        async function loadConstraints() {
+            try {
+                const r = await fetch('/api/constraints');
+                const list = await r.json();
+                const el = document.getElementById('constraintList');
+                if (!list.length) { el.innerHTML = '<em>적용 중인 제약 없음</em>'; return; }
+                el.innerHTML = list.map(c => `
+                    <div class="d-flex align-items-center justify-content-between border-bottom py-1">
+                        <div>
+                            <span class="badge ${c.enabled ? 'bg-success' : 'bg-secondary'}">${c.enabled ? 'ON' : 'OFF'}</span>
+                            ${escapeHtml(c.text)}
+                        </div>
+                        <div>
+                            <button class="btn btn-outline-secondary btn-sm py-0" onclick="toggleConstraint(${c.id})">${c.enabled ? '끄기' : '켜기'}</button>
+                            <button class="btn btn-outline-danger btn-sm py-0" onclick="deleteConstraint(${c.id})">삭제</button>
+                        </div>
+                    </div>`).join('');
+            } catch(e) {
+                document.getElementById('constraintList').innerHTML = `<span class="text-danger">목록 로드 오류: ${e}</span>`;
+            }
+        }
+
+        function escapeHtml(s) {
+            return (s || '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+        }
+
+        async function toggleConstraint(cid) {
+            await fetch(`/api/constraints/${cid}/toggle`, {method: 'POST'});
+            loadConstraints();
+        }
+
+        async function deleteConstraint(cid) {
+            if (!confirm('이 제약을 삭제할까요?')) return;
+            await fetch(`/api/constraints/${cid}`, {method: 'DELETE'});
+            loadConstraints();
+        }
+
+        loadConstraints();
     </script>
 </body>
 </html>

@@ -43,3 +43,4 @@ paint\ 2.xlsx
 
 # Claude
 .claude/
+custom_constraints.json

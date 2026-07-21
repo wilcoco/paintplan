@@ -12,6 +12,13 @@ from flask import Flask, render_template, request, jsonify, send_file
 from flask_sqlalchemy import SQLAlchemy
 from collections import defaultdict
 
+# .env 에서 ANTHROPIC_API_KEY 등 환경변수 로드 (있으면)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 app = Flask(__name__)
 
 # Database configuration
@@ -561,6 +568,114 @@ def api_schedule():
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+# ============================================
+# 커스텀 제약 (자연어 → 코드, C 방식)
+# ============================================
+@app.route('/api/constraints', methods=['GET'])
+def api_list_constraints():
+    """저장된 커스텀 제약 목록."""
+    from constraint_translator import load_constraints
+    return jsonify(load_constraints())
+
+
+@app.route('/api/constraints/translate', methods=['POST'])
+def api_translate_constraint():
+    """자연어 → 제약코드 번역 + AST 검증 + (선택) 실행가능성 테스트.
+    저장하지 않고 미리보기만 반환한다 (사람 승인 게이트)."""
+    from constraint_translator import (translate, validate_ast, ValidationError,
+                                        set_preview, clear_preview)
+    data = request.json or {}
+    text = (data.get('text') or '').strip()
+    demand_date = data.get('date')
+    if not text:
+        return jsonify({'error': '지시문이 비어 있습니다.'}), 400
+
+    # 1. 번역
+    try:
+        code = translate(text)
+    except RuntimeError as e:
+        return jsonify({'error': f'번역 실패: {e}'}), 500
+
+    # 2. AST 검증
+    try:
+        validate_ast(code)
+    except ValidationError as e:
+        return jsonify({'code': code, 'valid': False,
+                        'error': f'안전성 검증 실패: {e}'}), 200
+
+    result = {'code': code, 'valid': True, 'feasible': None, 'feasible_msg': ''}
+
+    # 3. 실행가능성 테스트 (날짜가 주어지면)
+    if demand_date:
+        try:
+            from schedulers import schedule_mip
+            items = load_data_from_db(demand_date)
+            if items:
+                set_preview(code)
+                try:
+                    res = schedule_mip(items)
+                finally:
+                    clear_preview()
+                if isinstance(res, dict) and res.get('error'):
+                    result['feasible'] = False
+                    result['feasible_msg'] = res['error']
+                else:
+                    result['feasible'] = True
+                    result['feasible_msg'] = '실행가능: 해를 찾았습니다.'
+            else:
+                result['feasible_msg'] = f'{demand_date} 데이터 없음 — 실행가능성 미검증'
+        except Exception as e:
+            result['feasible'] = False
+            result['feasible_msg'] = f'테스트 오류: {e}'
+
+    return jsonify(result)
+
+
+@app.route('/api/constraints', methods=['POST'])
+def api_save_constraint():
+    """승인된 제약을 저장 (재검증 후)."""
+    from constraint_translator import (load_constraints, save_constraints,
+                                        validate_ast, ValidationError)
+    data = request.json or {}
+    text = (data.get('text') or '').strip()
+    code = (data.get('code') or '').strip()
+    if not text or not code:
+        return jsonify({'error': 'text와 code가 필요합니다.'}), 400
+    try:
+        validate_ast(code)
+    except ValidationError as e:
+        return jsonify({'error': f'안전성 검증 실패: {e}'}), 400
+
+    constraints = load_constraints()
+    new_id = max([c.get('id', 0) for c in constraints], default=0) + 1
+    constraints.append({'id': new_id, 'text': text, 'code': code, 'enabled': True})
+    save_constraints(constraints)
+    return jsonify({'id': new_id, 'ok': True})
+
+
+@app.route('/api/constraints/<int:cid>/toggle', methods=['POST'])
+def api_toggle_constraint(cid):
+    from constraint_translator import load_constraints, save_constraints
+    constraints = load_constraints()
+    for c in constraints:
+        if c.get('id') == cid:
+            c['enabled'] = not c.get('enabled', True)
+            save_constraints(constraints)
+            return jsonify({'id': cid, 'enabled': c['enabled']})
+    return jsonify({'error': 'not found'}), 404
+
+
+@app.route('/api/constraints/<int:cid>', methods=['DELETE'])
+def api_delete_constraint(cid):
+    from constraint_translator import load_constraints, save_constraints
+    constraints = load_constraints()
+    new_list = [c for c in constraints if c.get('id') != cid]
+    if len(new_list) == len(constraints):
+        return jsonify({'error': 'not found'}), 404
+    save_constraints(new_list)
+    return jsonify({'ok': True})
+
 
 @app.route('/api/report', methods=['GET'])
 def api_report():

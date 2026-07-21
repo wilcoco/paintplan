@@ -31,6 +31,135 @@ JIG_INVENTORY = {
 
 SPECIAL_COLORS = {'MGG', 'T4M', 'UMA', 'ZRM', 'ISM', 'MRM'}
 
+
+# ============================================
+# 커스텀 제약 주입용 컨텍스트 (자연어→코드 C 방식)
+# constraint_translator.SYSTEM_PROMPT 의 ctx 스펙과 1:1로 맞춰야 함
+# ============================================
+class ConstraintRejected(Exception):
+    """LLM이 모델로 표현 불가능하다고 판단해 ctx.reject() 호출한 경우."""
+    pass
+
+
+class MIPContext:
+    """생성된 커스텀 제약 함수에 노출되는 안전한 인터페이스.
+
+    솔버 변수(x,h,y,cc)를 메서드로만 노출하고, group_active 같은 보조변수는
+    필요할 때 지연 생성한다. 제약은 ctx.add()로만 추가한다.
+    """
+
+    def __init__(self, solver, x, h, y, cc, items, grp_items, color_items,
+                 groups, colors, n_rotations, rotations_per_day=ROTATIONS,
+                 weights=None):
+        self.solver = solver
+        self._x = x
+        self._h = h
+        self._y = y
+        self._cc = cc
+        self.items = items
+        self._grp_items = grp_items
+        self._color_items = color_items
+        self.groups = groups
+        self.colors = colors
+        self.n_rotations = n_rotations
+        self.rotations_per_day = rotations_per_day
+        self.n_days = n_rotations // rotations_per_day
+        self.n_items = len(items)
+        self.SPECIAL_COLORS = SPECIAL_COLORS
+        self._group_active = {}
+        # 목적함수 가중치 (커스텀 규칙이 set_weight 으로 조절)
+        self.weights = dict(weights) if weights else {}
+
+    # --- 변수 접근자 (없는 키는 0 반환 → 제약이 자명해짐) ---
+    def prod(self, i, r):
+        return self._x[i, r]
+
+    def hangers(self, g, r):
+        return self._h.get((g, r), 0)
+
+    def uses_color(self, c, r):
+        return self._y.get((c, r), 0)
+
+    def color_start(self, c, r):
+        return self._cc.get((c, r), 0)
+
+    def group_prod(self, g, r):
+        idxs = self._grp_items.get(g, [])
+        return sum(self._x[i, r] for i in idxs) if idxs else 0
+
+    def color_prod(self, c, r):
+        idxs = self._color_items.get(c, [])
+        return sum(self._x[i, r] for i in idxs) if idxs else 0
+
+    def group_active(self, g, r):
+        """그룹 g가 회전 r에서 행어를 1개 이상 쓰면 1 (이진 보조변수, 지연 생성)."""
+        if (g, r) in self._group_active:
+            return self._group_active[g, r]
+        hv = self._h.get((g, r))
+        if hv is None:
+            return 0
+        ga = self.solver.BoolVar(f'ga_{g}_{r}')
+        self.solver.Add(hv <= HANGERS * ga)  # hv>=1 => ga=1
+        self.solver.Add(ga <= hv)            # hv=0  => ga=0
+        self._group_active[g, r] = ga
+        return ga
+
+    # --- 시프트 판별 (1일/2일 모델 공통: 회전 r의 날짜 내 위치로 판정) ---
+    def is_night(self, r):
+        """회전 r이 야간(6~10회전, 즉 날짜 내 6~9 인덱스)이면 True. 1일/2일 모두 동작."""
+        return (r % self.rotations_per_day) >= 5
+
+    def is_day_shift(self, r):
+        """회전 r이 주간(1~5회전, 즉 날짜 내 0~4 인덱스)이면 True."""
+        return (r % self.rotations_per_day) < 5
+
+    def day_of(self, r):
+        """회전 r이 속한 날짜 인덱스 (0=D0, 1=D+1...)."""
+        return r // self.rotations_per_day
+
+    # --- 목적함수 가중치 조절 ---
+    def set_weight(self, name, value):
+        """목적함수 가중치 설정. name은 알려진 키여야 하고 value는 숫자."""
+        if name not in self.weights:
+            raise ValueError(f"알 수 없는 가중치 '{name}'. 가능: {sorted(self.weights)}")
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(f"가중치 '{name}' 값은 숫자여야 합니다.")
+        self.weights[name] = value
+
+    # --- 제약 추가 / 거부 ---
+    def add(self, expr):
+        self.solver.Add(expr)
+
+    def reject(self, reason):
+        raise ConstraintRejected(reason)
+
+
+def apply_custom_constraints(ctx):
+    """저장된 활성 커스텀 제약들을 ctx에 주입.
+
+    각 제약은 저장 시 AST 검증을 통과했지만, 주입 직전 한 번 더 검증한다.
+    개별 제약 실패는 건너뛰고 (applied, errors) 리스트로 보고한다.
+    """
+    try:
+        from constraint_translator import active_constraints, validate_ast, compile_constraint
+    except ImportError:
+        return [], []
+    applied, errors = [], []
+    for c in active_constraints():
+        code = c.get('code', '')
+        label = c.get('text', '')[:40]
+        try:
+            validate_ast(code)
+            fn = compile_constraint(code)
+            fn(ctx)
+            applied.append(label)
+        except ConstraintRejected as e:
+            errors.append(f'[거부됨] {label}: {e}')
+        except Exception as e:
+            errors.append(f'[오류] {label}: {e}')
+    return applied, errors
+
+
 def get_color_change_cost(from_color):
     """컬러교환 시 빈행어 수"""
     if from_color and from_color.upper() in SPECIAL_COLORS:
@@ -572,7 +701,17 @@ def schedule_mip(items):
     solver.Add(total_color_rotation_pairs <= 32)
 
     # ============================================
+    # 커스텀 제약 주입 (웹 입력창 → 자연어 → 코드, C 방식)
+    # 기본 목적함수 가중치를 ctx에 넘기면, 커스텀 규칙이 set_weight 로 조절 가능
+    # ============================================
+    _ctx = MIPContext(solver, x, h, y, cc, items, grp_items, color_items,
+                      groups, colors, n_rotations, rotations_per_day=ROTATIONS,
+                      weights={'cc_weight': 1000, 'production_weight': 1, 'empty_weight': 100})
+    _applied, _custom_errors = apply_custom_constraints(_ctx)
+
+    # ============================================
     # 목적함수: 빈행어 최소화 (특수컬러 15배 반영)
+    # 가중치는 커스텀 규칙이 조절했을 수 있음 (ctx.weights)
     # ============================================
     total_color_starts = sum(cc[c, r] for c in colors for r in range(n_rotations))
     total_production = sum(x[i, r] for i in range(n_items) for r in range(n_rotations))
@@ -580,11 +719,11 @@ def schedule_mip(items):
     # 빈행어 비용: 특수컬러 종료 * 15 + 일반컬러 종료 * 1
     empty_hanger_cost = 15 * special_color_ends + 1 * normal_color_ends
 
-    # CC 최소화 + 빈행어 비용 반영
-    CC_WEIGHT = 1000
-    EMPTY_WEIGHT = 100  # 빈행어 1개 = 100 가치
+    CC_WEIGHT = _ctx.weights['cc_weight']
+    EMPTY_WEIGHT = _ctx.weights['empty_weight']
+    PROD_WEIGHT = _ctx.weights['production_weight']
 
-    solver.Minimize(CC_WEIGHT * total_color_starts + EMPTY_WEIGHT * empty_hanger_cost - total_production)
+    solver.Minimize(CC_WEIGHT * total_color_starts + EMPTY_WEIGHT * empty_hanger_cost - PROD_WEIGHT * total_production)
 
     solver.SetTimeLimit(30000)  # 30초 (Railway 타임아웃 방지)
 
@@ -592,7 +731,10 @@ def schedule_mip(items):
     status = solver.Solve()
 
     if status not in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
-        return {'error': f'최적해를 찾을 수 없습니다. 상태: {status}'}
+        msg = f'최적해를 찾을 수 없습니다. 상태: {status}'
+        if _applied:
+            msg += f' (적용된 커스텀 제약 {len(_applied)}개가 실행불가를 유발했을 수 있습니다: {", ".join(_applied)})'
+        return {'error': msg, 'custom_applied': _applied, 'custom_errors': _custom_errors}
 
     # 결과 추출
     for i, item in enumerate(items):
@@ -642,6 +784,8 @@ def schedule_mip(items):
 
     return {
         'algorithm': 'MIP',
+        'custom_applied': _applied,
+        'custom_errors': _custom_errors,
         'd0': {
             'color_changes': cc_count,
             'cc_count': cc_count,  # 리포트 호환
@@ -848,13 +992,23 @@ def schedule_mip_2days(items):
     # 12. 회전당 컬러 수 제한 - 생략 (속도 향상)
 
     # ============================================
-    # 목적함수: CC 최소화 + 생산량 최대화
+    # 커스텀 제약 주입 (C 방식) — 2일 모델 (n_rotations=20, rotations_per_day=10)
+    # ctx.is_night/is_day_shift 가 D0/D+1 양쪽 시프트를 올바르게 판정
+    # ============================================
+    _ctx = MIPContext(solver, x, h, y, cc, items, grp_items, color_items,
+                      groups, colors, n_rotations, rotations_per_day=ROTATIONS,
+                      weights={'cc_weight': 1000, 'production_weight': 1, 'empty_weight': 0})
+    _applied, _custom_errors = apply_custom_constraints(_ctx)
+
+    # ============================================
+    # 목적함수: CC 최소화 + 생산량 최대화 (가중치는 커스텀 규칙이 조절 가능)
     # ============================================
     total_color_starts = sum(cc[c, r] for c in colors for r in range(n_rotations))
     total_production = sum(x[i, r] for i in range(n_items) for r in range(n_rotations))
 
-    CC_WEIGHT = 1000
-    solver.Minimize(CC_WEIGHT * total_color_starts - total_production)
+    CC_WEIGHT = _ctx.weights['cc_weight']
+    PROD_WEIGHT = _ctx.weights['production_weight']
+    solver.Minimize(CC_WEIGHT * total_color_starts - PROD_WEIGHT * total_production)
 
     solver.SetTimeLimit(45000)  # 45초
     # 빠른 해 탐색 우선
@@ -863,7 +1017,10 @@ def schedule_mip_2days(items):
     status = solver.Solve()
 
     if status not in [pywraplp.Solver.OPTIMAL, pywraplp.Solver.FEASIBLE]:
-        return {'error': f'최적해를 찾을 수 없습니다. 상태: {status}'}
+        msg = f'최적해를 찾을 수 없습니다. 상태: {status}'
+        if _applied:
+            msg += f' (적용된 커스텀 제약 {len(_applied)}개가 실행불가를 유발했을 수 있습니다: {", ".join(_applied)})'
+        return {'error': msg, 'custom_applied': _applied, 'custom_errors': _custom_errors}
 
     # 결과 추출
     for i, item in enumerate(items):
@@ -927,6 +1084,8 @@ def schedule_mip_2days(items):
 
     return {
         'algorithm': 'MIP_2days',
+        'custom_applied': _applied,
+        'custom_errors': _custom_errors,
         'd0': {
             'color_changes': losses_d0['cc_count'],
             'cc_count': losses_d0['cc_count'],
