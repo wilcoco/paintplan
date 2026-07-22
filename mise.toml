@@ -1,0 +1,4 @@
+[settings]
+# Railway/Railpack 빌드 시 mise가 python 설치 중 GitHub attestation 검증에
+# 실패하는 문제 회피 (mise 2026.7.x 회귀). 빌드 환경에서만 사용.
+python.github_attestations = false
